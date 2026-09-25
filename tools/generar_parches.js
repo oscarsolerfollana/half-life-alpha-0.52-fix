@@ -1,0 +1,71 @@
+// Genera src/parches.h comparando los binarios ORIGINALES de la alpha con
+// los parcheados. Solo se guardan los bytes NUEVOS (nada de Valve) y el
+// hash de cada original, para que la DLL compruebe la version antes de
+// tocar nada. Uso: node generar_parches.js <enginegl.exe> <exe parcheado>
+//                   <hl.dll original> <hl.dll parcheado> <salida.h>
+const fs = require("fs");
+const [exeO, exeP, hlO, hlP, salida] = process.argv.slice(2);
+
+function fnv1a64(buf) {
+  let h = 0xcbf29ce484222325n;
+  for (const b of buf) { h ^= BigInt(b); h = (h * 0x100000001b3n) & 0xffffffffffffffffn; }
+  return h;
+}
+function secciones(d) {
+  const pe = d.readInt32LE(0x3c), ns = d.readUInt16LE(pe + 6), so = pe + 24 + d.readUInt16LE(pe + 20);
+  const s = [];
+  for (let i = 0; i < ns; i++) { const b = so + i * 40;
+    s.push({ va: d.readUInt32LE(b + 12), vs: d.readUInt32LE(b + 8), rs: d.readUInt32LE(b + 16), ro: d.readUInt32LE(b + 20) }); }
+  return { base: d.readUInt32LE(pe + 24 + 28), s, reloc: [d.readUInt32LE(pe + 24 + 96 + 40), d.readUInt32LE(pe + 24 + 96 + 44)] };
+}
+function va_de(d, info, off) {
+  for (const x of info.s) if (off >= x.ro && off < x.ro + x.rs) return info.base + x.va + (off - x.ro);
+  return null;   // cabeceras
+}
+function reubicaciones(d, info) {
+  const [rva, sz] = info.reloc, out = new Set();
+  if (!rva) return out;
+  let fo = 0; for (const x of info.s) if (rva >= x.va && rva < x.va + Math.max(x.vs, x.rs)) fo = x.ro + rva - x.va;
+  let p = fo;
+  while (p < fo + sz) { const page = d.readUInt32LE(p), bs = d.readUInt32LE(p + 4); if (!bs) break;
+    for (let q = p + 8; q < p + bs; q += 2) { const e = d.readUInt16LE(q); if (e >> 12) out.add(info.base + page + (e & 0xfff)); }
+    p += bs; }
+  return out;
+}
+function tramos(orig, parch, excluir, relocs) {
+  if (orig.length !== parch.length) throw "tamanos distintos";
+  const info = secciones(orig), res = [];
+  let i = 0;
+  while (i < orig.length) {
+    if (orig[i] === parch[i]) { i++; continue; }
+    let j = i; while (j < orig.length && orig[j] !== parch[j]) j++;
+    const va = va_de(orig, info, i);
+    if (va === null) { i = j; continue; }                       // cabecera PE (punto de entrada): fuera
+    if (excluir.some(([a, b]) => va >= a && va < b)) { i = j; continue; }
+    for (let k = i; k < j; k++) {                                // no tocar bytes altos reubicados
+      const v = va_de(orig, info, k);
+      for (const r of relocs) if (v >= r + 2 && v < r + 4) throw `el byte 0x${v.toString(16)} cae en la parte alta de una reubicacion`;
+    }
+    res.push({ va, bytes: [...parch.slice(i, j)] });
+    i = j;
+  }
+  return res;
+}
+const eo = fs.readFileSync(exeO), ep = fs.readFileSync(exeP), ho = fs.readFileSync(hlO), hp = fs.readFileSync(hlP);
+// el cargador de hlsave.dll que iba en el hueco de .text (stub + nombre) ya no hace falta
+const te = tramos(eo, ep, [[0x45649a, 0x4564b5]], new Set());
+const th = tramos(ho, hp, [], reubicaciones(ho, secciones(ho)));
+const hex = (n) => "0x" + n.toString(16).toUpperCase();
+let h = "/* GENERADO por tools/generar_parches.js: no editar a mano.\n * Solo bytes NUEVOS; los originales de Valve se identifican por su hash. */\n\n";
+h += `#define HASH_ENGINEGL 0x${fnv1a64(eo).toString(16).toUpperCase()}ULL   /* enginegl.exe original, ${eo.length} bytes */\n`;
+h += `#define HASH_HL_DLL   0x${fnv1a64(ho).toString(16).toUpperCase()}ULL   /* valve\dlls\hl.dll original, ${ho.length} bytes */\n`;
+h += `#define BASE_HL_DLL   ${hex(secciones(ho).base)}u   /* base preferida de hl.dll */\n\n`;
+h += "typedef struct { unsigned int va; unsigned short n; const unsigned char *b; } parche_t;\n\n";
+for (const [nom, lista] of [["parches_exe", te], ["parches_hl", th]]) {
+  lista.forEach((t, k) => { h += `static const unsigned char ${nom}_${k}[] = {${t.bytes.map(b => "0x" + b.toString(16).padStart(2, "0")).join(",")}};\n`; });
+  h += `static const parche_t ${nom}[] = {\n` + lista.map((t, k) => `    { ${hex(t.va)}, ${t.bytes.length}, ${nom}_${k} },`).join("\n") + `\n    { 0, 0, 0 }\n};\n\n`;
+}
+fs.writeFileSync(salida, h);
+console.log(`exe: ${te.length} tramos, ${te.reduce((a, t) => a + t.bytes.length, 0)} bytes | hl.dll: ${th.length} tramos, ${th.reduce((a, t) => a + t.bytes.length, 0)} bytes`);
+console.log("exe:", te.map(t => hex(t.va) + "+" + t.bytes.length).join(" "));
+console.log("hl :", th.map(t => hex(t.va) + "+" + t.bytes.length).join(" "));

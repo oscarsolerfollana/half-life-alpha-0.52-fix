@@ -1,0 +1,1529 @@
+===============================================================================
+ HALF-LIFE ALPHA 0.52 - GUARDAR Y CARGAR PARTIDA
+ Comprobado sobre enginegl.exe el 18-09-2026
+===============================================================================
+
+RESUMEN
+-------
+  GUARDAR  : SI funciona (con "maxplayers 1").
+  CARGAR   : el motor de la alpha NO la trae (apartados 1 a 4), pero esta
+             escrita entera en hlsave.dll y funciona, tambien volviendo a
+             abrir el juego (apartados 7, 8 y 13).
+
+
+1. GUARDAR
+----------
+Funciona, pero solo en partida de un jugador. El motor comprueba el numero
+de jugadores y si es mayor que uno responde:
+
+    Can't save multiplayer games.
+
+La alpha arranca en modo multijugador aunque elijas "Single Player" (esta
+descrito en el propio README.txt del repack), asi que por defecto nunca te
+deja guardar. La solucion es forzar un jugador antes de cargar el mapa:
+
+    maxplayers 1
+    map c1a1
+
+El lanzador "Half-Life Alpha Launcher.bat" ya lo hace en sus opciones 1, 2 y 3.
+
+Formas de guardar dentro del juego:
+    F6                     guardado rapido (crea valve\quick.sav)
+    F2                     menu de guardado (crea valve\s0.sav, s1.sav...)
+    save <nombre>          por consola, tecla ~ (crea valve\<nombre>.sav)
+
+Los .sav se escriben en la carpeta valve\ , NO en valve\SAVE\ (esa carpeta
+esta vacia y el motor no la usa).
+
+Comprobacion hecha: con "maxplayers 1 / map c1a1 / save zclaude" el motor
+escribio un valve\zclaude.sav de 66 KB y en la consola aparecio
+"Saving game to ...\valve\zclaude.sav...". El guardado es correcto y completo:
+dentro estan el nombre del mapa, y del jugador la posicion (origin), los
+angulos, la vida, el arma y la municion.
+
+
+2. CARGAR
+---------
+No funciona. Al hacer "load zclaude" el motor contesta:
+
+    Loading game from ...\valve\zclaude.sav...
+    Savegame is version 4624156, not 16
+
+Y se queda como estaba. El numero 4624156 no es una version: es basura,
+una direccion de memoria del propio ejecutable.
+
+La causa, mirando el binario:
+
+  a) La rutina de GUARDAR es la nueva de Half-Life. Escribe una cabecera
+     binaria "VALV" seguida de la version 16, y luego los datos. Se ve en el
+     fichero: los primeros 8 bytes son 56 41 4C 56 10 00 00 00 = "VALV" + 16.
+     O sea, el .sav SI es de la version 16 que el motor dice esperar.
+
+  b) La rutina de CARGAR se quedo sin portar: sigue siendo la de Quake, que
+     espera un fichero de TEXTO y lee la version con fscanf(f, "%i\n", ...).
+     Como el fichero empieza por "VALV", fscanf no encuentra ningun numero,
+     falla, y la variable de version se queda con basura. De ahi el 4624156.
+     Por eso el mensaje es contradictorio: dice que no es la version 16
+     cuando en el fichero pone exactamente 16.
+
+  c) Y lo de fondo, que es lo que cierra el asunto: la logica del juego vive
+     en valve\dlls\hl.dll, que exporta DispatchSave y DispatchRestore. El
+     motor resuelve los dos punteros al arrancar, pero SOLO llega a llamar a
+     DispatchSave. A DispatchRestore no le llama desde ningun sitio del
+     ejecutable: se guarda el puntero, se comprueba que no sea nulo, y ahi
+     se queda. No existe camino de restauracion de entidades.
+
+Conclusion: no es un problema de configuracion, ni de permisos, ni de donde
+se dejan los .sav. Cargar no esta implementado en este motor. Arreglarlo no
+es un parche de un byte: habria que escribir entera la rutina de carga
+(interpretar el bloque VALV, recrear las entidades y llamar a DispatchRestore
+por cada una) e inyectarla en el ejecutable.
+
+
+3. QUE SE PUEDE HACER MIENTRAS TANTO
+------------------------------------
+La opcion [2] del lanzador lee de cada .sav en que mapa se guardo y te deja
+empezar ese mapa desde el principio. No recupera posicion, vida ni armas,
+pero al menos sirve de "selector de capitulo".
+
+Dentro del .sav esta toda la informacion necesaria para ir mas alla (posicion
+exacta, angulos, vida, arma y municion). Con eso se podria montar un sistema
+de puntos de control de verdad, pero el motor de la alpha no tiene comando
+para teletransportar al jugador, asi que habria que reescribir el
+info_player_start del mapa. Es un trabajo aparte y bastante mas largo.
+
+
+4. VIABILIDAD DE ESCRIBIR LA CARGA (18-09-2026, corregido)
+----------------------------------------------------------
+AVISO: un primer analisis de este apartado estaba mal. Al leer la tabla de
+exports de hl.dll tome la columna equivocada y desensamble funciones que no
+eran. Repetido bien, el resultado es el contrario del que puse primero.
+
+Exports buenos de hl.dll (la PRIMERA columna de objdump es el indice):
+    GiveFnptrsToDll  0x1000dbf0   DispatchSave  0x10004020
+    DispatchRestore  0x10004050
+
+GiveFnptrsToDll copia una tabla de 64 punteros del motor a 0x10032768. Con
+eso, DispatchSave llama al metodo virtual 3 de la entidad y DispatchRestore
+al 4. Buscando todas las vtables de la DLL, las 50 y pico clases comparten
+el MISMO par, sin redefinirlo nunca:
+
+    Save    = 0x10001810
+    Restore = 0x10001840
+
+Y ahi esta lo importante:
+
+    Restore (0x10001840) es UNA SOLA INSTRUCCION:  ret 0x4
+    Esta vacia. No hace absolutamente nada.
+
+    Save (0x10001810) tampoco serializa: coge el classname y llama a la
+    funcion 49 de la tabla del motor con la cadena "Saving %s\n". Es una
+    traza de depuracion, no un guardado.
+
+CONCLUSION CORREGIDA: la DLL del juego no guarda ni restaura nada. El
+save/restore del lado DLL es un andamio que Valve dejo puesto y nunca
+relleno. Todo lo que hay en el .sav lo escribe el MOTOR: las entvars de cada
+entidad en texto (origin, angles, health, weapons, currentammo, classname...)
+mas las globales y los lightstyles.
+
+Esto tiene dos caras:
+
+  BUENO: no hay ningun formato privado que reverseair, y no hace falta
+  DispatchRestore para nada. El trabajo es 100% del lado del motor, que es
+  donde se puede trabajar comodo.
+
+  MALO: el techo de fidelidad lo fija lo que hay en las entvars. Posicion,
+  angulos, vida, armas y municion del jugador: si. Estado interno de los
+  bichos, puertas a medio abrir, temporizadores: no esta guardado, asi que
+  no hay forma de recuperarlo. Al cargar, el mundo volveria a su estado
+  inicial y tu apareces donde guardaste, con tu vida y tus armas.
+
+
+5. SONDEO DE INYECCION: HECHO Y FUNCIONANDO (18-09-2026)
+--------------------------------------------------------
+El registro de comandos esta en 0x42e8da y siguientes, con
+Cmd_AddCommand = 0x426ab1:
+
+    "load"  ->  manejador 0x42d1bd   (el roto)
+    "save"  ->  manejador 0x42cfc4
+
+El puntero de "load" se parchea en el offset de fichero 0x2dce8 (contenia
+bd d1 42 00 = 0x42d1bd).
+
+Hay 358 bytes de relleno a cero al final de .text, en la VA 0x45649a
+(offset de fichero 0x5589a), utilizables como hueco de codigo.
+
+PRUEBA REALIZADA: se creo enginegl-carga.exe (copia parcheada, el
+enginegl.exe original no se toca) con un stub de 14 bytes en el hueco:
+
+    push  <cadena>
+    call  0x41754e        (Con_Printf del motor)
+    add   esp,4
+    ret
+
+y el manejador de "load" repuntado a el. Al ejecutar "load quick" el juego
+imprimio por su propia consola:
+
+    [CLAUDE] gancho de carga activo, load interceptado
+
+O sea: se puede ejecutar codigo propio dentro del motor y usar sus funciones.
+La via de inyeccion esta demostrada. El hueco de 358 bytes solo da para el
+sondeo; para el cargador de verdad habria que añadir una seccion al PE.
+
+
+6. ¿SE PUEDE HACER UN GUARDADO Y CARGADO COMPLETO? (18-09-2026)
+---------------------------------------------------------------
+SI, pero NO tocando solo la carga. Hay que ampliar tambien el GUARDADO.
+
+El motivo es simple: el estado privado de las entidades no esta en el .sav
+porque nunca se escribio (el Save de la DLL es una traza vacia). Ningun
+cargador puede recuperar datos que no estan en el fichero. Los .sav
+actuales son irrecuperables por definicion; haria falta un formato nuevo.
+
+Lo que hace esto viable es como esta montada la memoria de las entidades:
+
+  - Entrada 51 de la tabla del motor (0x40a013) = PvAllocEntPrivateData:
+        free_anterior(edict)
+        if (tam > 0) puntero = calloc(1, tam)
+        edict[0x74] = puntero
+    El tamaño lo pasa la DLL, y el bloque lo reserva EL MOTOR.
+
+  - Entrada 52 (0x40a03d) = devuelve edict[0x74]
+  - Entrada 53 (0x40a045) = lo libera
+
+  - Hay 117 sitios de llamada en hl.dll, uno por clase, cada uno con su
+    tamaño (ej: push $0x1c = 28 bytes) y escribiendo su vtable en el
+    offset 0 del bloque recien reservado.
+
+O sea: el estado privado de cada entidad es UN BLOQUE PLANO de heap, de
+tamaño conocido, y todo pasa por UNA SOLA funcion del motor. Ese es el
+punto de estrangulamiento que hace falta.
+
+PLAN PARA UN GUARDADO COMPLETO:
+  1. Parchear la entrada 51 para anotar el tamaño de cada bloque (el motor
+     hoy no lo guarda; hay que apuntarlo en una tabla lateral por edict).
+  2. Al guardar, volcar ademas el bloque en crudo de cada entidad.
+  3. Pasada de "swizzling" de punteros: recorrer cada bloque de 4 en 4
+     bytes y, si un valor cae dentro de otro bloque de entidad o del array
+     de edicts, sustituirlo por un token simbolico (indice + offset). Al
+     cargar se re-resuelve. Esto evita tener que entender la disposicion
+     interna de las 117 clases, que seria inviable.
+  4. Al cargar: reservar, memcpy del bloque, y arreglar punteros.
+     La vtable (offset 0) se restaura sola porque la DLL carga en base fija
+     0x10000000. El puntero a pev (offset 4) se recalcula.
+     >>> OJO: lo de la base fija es FALSO, y costo el fallo del apartado
+     13. hl.dll se reubica en cada arranque. La vtable hay que rehacerla. <<<
+
+RIESGO PRINCIPAL: el swizzling es la apuesta. Falsos positivos (un entero
+que coincida con una direccion) son improbables pero posibles, y los
+punteros a cosas del hunk del motor necesitan su propio tratamiento.
+No hay muro conocido, pero tampoco garantia hasta probarlo.
+
+
+7. TRABAJO EN CURSO: GUARDADO COMPLETO (18-09-2026)
+----------------------------------------------------
+MONTAJE
+  src-carga\motor.h      direcciones y estructuras del motor
+  src-carga\hlsave.c     la logica
+  src-carga\compilar.sh  compila con el mingw i686 del w64devkit
+  src-carga\parchear.ps1 regenera enginegl-carga.exe desde el original
+  hlsave.dll             resultado de compilar
+  enginegl-carga.exe     motor parcheado (enginegl.exe NO se toca)
+
+La inyeccion es por punto de entrada: parchear.ps1 pone un stub de 16
+bytes en el hueco de .text (0x45649a) que hace LoadLibraryA("hlsave.dll")
+y salta al arranque original (0x444660). Todo el resto del parcheo lo hace
+la DLL en memoria al cargarse, asi que iterar es solo recompilar la DLL.
+
+BUG DE 1997 ENCONTRADO Y ARREGLADO
+  El guardado original reserva un bufer FIJO de 64 KB (push 0x10000 en
+  0x42d036) y le mete dentro el estado entero. Cualquier mapa real se pasa:
+  los cuatro .sav de fabrica pesan entre 66.026 y 66.987 bytes, y el de
+  c1a1 sale a 66.056. Se desbordaba siempre, corrompia el heap y el juego
+  petaba al liberar el bufer, DESPUES de haber escrito el fichero.
+  Por eso el mensaje "done." no aparecia nunca y parecia que se colgaba.
+  Arreglado ampliando el bufer a 1 MB (parche en memoria del operando en
+  0x42d037). Ahora sale "done." y el guardado termina limpio.
+
+  O sea: guardar en la alpha no es que fuera incompleto, es que ademas
+  tumbaba el juego cada vez. Eso ya no pasa.
+
+GUARDADO AMPLIADO (funcionando)
+  Se engancha la entrada 51 de la tabla del motor (el asignador de datos
+  privados) para anotar el tamaño del bloque de cada entidad, que el motor
+  recibe pero no guarda. Y se repunta el manejador de "save" para que, tras
+  el guardado original, añada al fichero:
+
+      "CLDX" | version | num_edicts
+      por cada edict: tam | bloque en crudo | nrelocs | relocs[]
+      reloc = { desplazamiento, clase, destino, dentro }
+      clase 1 = puntero a un edict,  clase 2 = puntero a otro bloque
+
+  La lista de reubicacion se saca recorriendo cada bloque de 4 en 4 bytes
+  y mirando si el valor cae dentro del array de edicts o de otro bloque
+  privado. Asi no hay que entender la disposicion interna de las clases.
+
+  PROBADO en c1a1: 157 edicts, 153 con estado privado, 153 punteros
+  anotados, fichero de 66.056 -> 95.060 bytes, sin petar. La reubicacion
+  tipica es el puntero pev en el offset 4 del bloque, apuntando a
+  edict+0x78. Coincide con lo esperado.
+
+PENDIENTE: la carga.
+  Hay que escribirla entera (la original es el parser de texto de Quake y
+  no vale). Pasos: leer el fichero, arrancar el mapa sin que el BSP genere
+  las entidades, recrear los edicts con sus entvars usando ED_FindField
+  (0x408996) y ED_ParseEpair (0x40947b), reponer los bloques privados y
+  aplicar las reubicaciones.
+
+
+8. LA CARGA, FUNCIONANDO (18-09-2026)
+--------------------------------------
+Escrita entera y probada. La cadena es:
+
+  "load nombre"  ->  mi_load: lee el fichero, saca el nombre del mapa,
+                     marca carga pendiente y encola "map <mapa>" AL
+                     PRINCIPIO de la cola (Cbuf_InsertText, 0x42643e;
+                     con Cbuf_AddText iria detras del resto del guion).
+  "map"          ->  enganchado en 0x42e76e. Arranca el mapa como siempre
+                     y, si hay carga pendiente, repone el estado.
+
+No se puede registrar un comando propio para el segundo paso:
+Cmd_AddCommand (0x426ab1) comprueba host_initialized (0x8572a4) y aborta
+el juego con "Cmd_AddCommand after host_initialized". De ahi que se
+enganche el propio "map".
+
+DOS TRAMPAS QUE COSTARON UN RATO
+  a) El fichero se abria con FILE_APPEND_DATA. Con esa bandera TODA
+     escritura va al final pase lo que pase, asi que el retroceso para
+     rellenar la cuenta de cadenas se anexaba en vez de sobrescribir y
+     descuadraba el fichero entero. Hay que abrir con GENERIC_WRITE.
+
+  b) Al reponer un edict NO se puede poner su cabecera a cero. Los bytes
+     0x04..0x77 llevan los enlaces de area, una lista doblemente enlazada
+     entre edicts. Si se ceran sin desenlazar antes, los vecinos siguen
+     apuntando a un nodo muerto y el motor revienta al recorrer la lista.
+     Solucion: tocar solo las entvars (0x78 en adelante) y el flag libre.
+
+  Ademas la restauracion valida el bloque entero ANTES de tocar nada; si
+  no, un fichero corrupto dejaria la partida a medio destruir.
+
+PRUEBA CONCLUYENTE (c1a1, guardar tras 13,6 s de partida y luego cargar):
+
+  AL GUARDAR             t=13666ms vida=100 origen=(-28 1260 -299) suma=0x7ba3bba7
+  MAPA RECIEN ARRANCADO  t= 1200ms vida=  0 origen=(  0    0    0) suma=0x00000000
+  TRAS CARGAR            t=13666ms vida=100 origen=(-28 1260 -299) suma=0x7ba3bba7
+
+  La linea del medio es la clave: el mapa recien arrancado tiene un estado
+  COMPLETAMENTE distinto (reloj a 1,2 s, vida 0, origen en el centro del
+  mundo y el bloque privado a ceros). Tras restaurar, todo vuelve a ser
+  exactamente lo guardado, incluida la suma de control de los 452 bytes
+  del bloque privado C++ del jugador. O sea que el estado privado viaja
+  entero, que era justo lo que no hacia la alpha.
+
+  157 edicts, 153 con estado privado, 153 reubicaciones aplicadas,
+  0 descuadres ocupado/libre.
+
+LO QUE FALTA POR PROBAR / PULIR
+  - Solo se ha probado guardar y cargar dentro de la misma sesion y en el
+    mismo mapa. Falta probar cargar desde el arranque del juego.
+  - El proceso no termina de salir con "quit" despues de una carga; se
+    queda colgado al cerrar. No afecta al juego pero hay que mirarlo.
+  - Sale el aviso "maxplayers can not be changed while a server is
+    running" porque la orden encolada lleva maxplayers 1. Es cosmetico.
+  - Falta comprobar el caso en que el mapa arranque con un numero de
+    entidades distinto al guardado (ahi si harian falta SV_LinkEdict y
+    SV_UnlinkEdict, todavia sin localizar).
+  - No se restauran los lightstyles ni las globales de progs.
+
+
+9. CARGA EN FRIO Y LANZADOR (18-09-2026)
+-----------------------------------------
+CARGA EN FRIO (cargar nada mas arrancar el juego): TODAVIA PETA.
+
+  Se descubrio que restaurar justo despues de "map" no vale en frio: el
+  cliente tarda varios fotogramas en conectarse, asi que el jugador aun
+  no existe (se veia en la traza: priv=0 al restaurar). Se movio el
+  enganche al comando "begin" (0x42e1d7, operando en 0x42e8a0), que cierra
+  el apreton de manos del cliente. Ahora el estado SI se restaura bien
+  tambien en frio, pero el juego revienta despues de que la restauracion
+  termine. El fallo esta en lo que el motor hace tras "begin", no dentro
+  de la restauracion ("restaurar: hecho" siempre sale antes del cierre.)
+
+  Hipotesis a mirar: tras "begin" el motor manda al cliente las lineas
+  base de todas las entidades, y algo de lo restaurado no le cuadra.
+
+EL ENGANCHE EN "begin" MEJORO LA PRUEBA EN CALIENTE
+  Ahora la traza deja ver tres estados bien distintos:
+      AL GUARDAR         t=11431ms suma=0x0f61b5e4
+      CLIENTE YA DENTRO  t= 1415ms suma=0x50611684   <- jugador recien
+                                                        creado, vivo y
+                                                        con estado propio
+      TRAS CARGAR        t=11431ms suma=0x0f61b5e4
+  O sea que no es que se restaure sobre un hueco vacio: se sobreescribe un
+  jugador ya existente y distinto, y queda exactamente el guardado.
+
+LANZADOR
+  "Half-Life Alpha Launcher.bat" usa ya por defecto enginegl-carga.exe.
+  Opcion [G] del menu para alternar entre el motor con guardado completo
+  y el original. Probada la logica de seleccion por separado (no se pudo
+  ejecutar el .bat entero desde aqui).
+
+
+10. ANGULOS DE VISTA AL CARGAR (18-09-2026)
+--------------------------------------------
+SINTOMA (visto jugando, no en los logs): al cargar, la partida vuelve
+bien pero el jugador mira siempre en la misma direccion.
+
+CAUSA: los angulos SI se restauran en el servidor, van en las entvars y
+se copian en crudo como todo. Pero el CLIENTE lleva su propia copia de
+hacia donde mira y no se entera de que el servidor se la ha cambiado.
+
+ARREGLO: poner fixangle=1 en la entidad del jugador tras restaurar. El
+servidor entonces manda un svc_setangle y el cliente salta a esa
+direccion. OJO: svc_setangle manda v.angles, NO v_angle. Son campos
+distintos y en los jugadores no valen lo mismo (Quake guarda en angles
+el cabeceo dividido entre 3, porque es para el modelo que ven los demas,
+no para tu vista). Por eso se iguala angles a v_angle antes de levantar
+la bandera. Esta en forzar_vista_jugador().
+
+Los tres campos existen en la alpha (v_angle, angles, fixangle) y la
+funcion se ejecuta, se ve en el log:
+    vista: v_angle=(0 0 0) copiado a angles, fixangle puesto
+
+NO VALIDADO AUN: las pruebas automaticas no mueven el raton, asi que
+v_angle siempre sale (0 0 0) y no demuestran nada. Hay que comprobarlo
+jugando: mirar a un sitio raro, guardar, girarse, cargar.
+
+Recordatorio: este fallo no lo detecto ninguna prueba automatica. Desde
+el log los angulos parecian correctos, porque lo estaban: el que estaba
+mal era el cliente.
+
+
+11. BALANCEO PEGADO AL CARGAR (18-09-2026)
+-------------------------------------------
+SINTOMA (visto jugando): si guardas mientras andas de lado y luego
+cargas, te quedas inclinado. Y no se endereza solo.
+
+CAUSA: el arreglo del apartado 10 copiaba los TRES angulos de v_angle a
+angles, incluido el balanceo. Pero el balanceo no es un angulo de vista
+de verdad: es el efecto de inclinacion al moverse de lado, que el motor
+recalcula solo en cada fotograma a partir de la velocidad. Al forzarselo
+al cliente con svc_setangle se le queda pegado en cl.viewangles, y como
+el raton solo toca cabeceo y giro, nadie lo vuelve a poner a cero nunca.
+
+ARREGLO: al forzar la vista, angles[2] (el balanceo) va a cero a
+proposito. Cabeceo y giro si se reponen. Esta en forzar_vista_jugador().
+
+Moraleja para lo que quede: no todo lo que esta en las entvars se debe
+reponer. Hay campos que son estado derivado, que el motor recalcula, y
+reponerlos hace mas mal que bien. Ojo con los demas efectos de vista
+(punch angles y similares) si aparecen sintomas parecidos.
+
+
+12. EL HUD NO SE VE: ES "sizedown" (18-09-2026, RESUELTO 20-09-2026)
+---------------------------------------------------------------------
+RESUMEN: el HUD arranca apagado y el comando que lo enciende es
+"sizedown". No es la resolucion, no es el parche y no es el arte.
+
+Pista que lo destapo: con "Half-Life GL Launcher.bat" el HUD SI se ve.
+Ese .bat lanza con exactamente el mismo video (-width 800 -bpp 32) que
+el launcher nuevo, asi que la resolucion quedaba descartada de entrada.
+
+LOS DOS COMANDOS, DESMONTADOS
+  sizeup    -> 0x42b427 -> 0x404541
+      si viewsize < 120: viewsize += 10  (Cvar_SetValue "viewsize")
+      si ya esta en 120: DECREMENTA el nivel del HUD (clamp a 0)
+  sizedown  -> 0x42b437 -> 0x404588
+      INCREMENTA el nivel del HUD; al pasar de 3 lo clava en 3 y
+      empieza a bajar viewsize -= 10
+  (nombres en 0x467f14 y 0x467f1c; el envoltorio ademas pone
+   0xd3b434 = 1, la marca de recalcular el refdef)
+
+  Por eso probar "sizeup" no enseño nada: va en el sentido contrario.
+
+  Las CUATRO unicas escrituras de 0x45a808 en todo el .text son el
+  clamp a 0 de sizeup y el clamp a 3 de sizedown. Nada mas lo toca:
+  ni el arranque de mapa, ni la carga, ni el cambio de nivel. Y NO se
+  guarda en config.cfg (no es un cvar), asi que cada arranque empieza
+  en 0 y hay que volver a pedirlo.
+
+QUE DIBUJA CADA NIVEL (capturas en valve\quake02..05.tga, c1a1, 800x600)
+  0 : nada
+  1 : barra de vida abajo a la izquierda
+  2 : + el marco/columna de la derecha
+  3 : + el panel de arriba a la izquierda
+  4o sizedown : igual que 3 (el clamp actua; el viewsize -= 10 no se
+      nota en el render GL)
+
+  Y el arte de 640 CUADRA a 800x600: las piezas van ancladas a las
+  esquinas, no escaladas. La sospecha de que solo valdria a 640 era
+  infundada.
+
+COMPROBADO CON LOS DOS MOTORES
+  enginegl.exe (original) y enginegl-carga.exe (parcheado), misma
+  linea de ordenes que la opcion [1] del launcher:
+    -heapsize 524288 -condebug -width 800 -bpp 32 +maxplayers 1
+    +map c1a1 +sizedown +exec cap_a.cfg
+  Los dos enseñan el HUD. Confirmado ademas que "+sizedown" detras de
+  "+map" SI se ejecuta: no hay que adelantarlo en la linea de ordenes.
+
+  El apartado original decia "capturas identicas con los dos motores,
+  y ninguna con HUD". Era cierto, pero no probaba nada: aquel cfg de
+  captura no llevaba sizedown, asi que las dos corridas estaban en
+  nivel 0.
+
+COMO SE HACEN LAS CAPTURAS (sigue valiendo)
+  - cfg con: waits, la orden que sea, waits, screenshot, waits, quit
+    (un "wait" es un fotograma; con 120-150 va sobrado)
+  - lanzar con +exec <cfg>; DESDE POWERSHELL con Start-Process, no
+    desde el shell de bash: desde bash el motor muere nada mas
+    escribir "Console initialized." y sale con codigo 1
+  - la captura sale en valve\quakeNN.tga, NO en valve\glquake\
+  - convertir con: ffmpeg -i entrada.tga -vf vflip salida.png
+    (el vflip hace falta: el TGA va de abajo arriba)
+  - queda hecho valve\hud_niveles.cfg, que recorre los cuatro niveles
+    y captura cada uno
+
+DECIDIDO (20-09-2026): el launcher se queda con UN solo "sizedown", o
+sea nivel 1: solo la barra de vida. Ya es lo que manda en las cuatro
+opciones, no hay nada que cambiar. Si algun dia se quiere el HUD
+entero, son tres "sizedown".
+
+13. CARGAR TRAS VOLVER A ABRIR EL JUEGO: ARREGLADO (22-09-2026)
+----------------------------------------------------------------
+SINTOMA: guardas, cierras el juego, lo vuelves a abrir, cargas y peta.
+Dentro de la misma sesion iba bien, y eso era justo lo que despistaba.
+
+LA CAUSA, EN UNA LINEA: el .sav llevaba dentro direcciones de memoria del
+proceso que guardo. En la misma sesion valen de milagro (el proceso es el
+mismo o cae en las mismas direcciones); en un proceso nuevo son punteros
+muertos.
+
+Analizando un .sav de los viejos (valve\quick.sav) por fuera del juego,
+los punteros en crudo eran de tres tipos:
+
+  286  punteros a hl.dll  -- la vtable C++ que va en el offset 0 de cada
+       bloque privado, mas punteros a metodos. AQUI ESTABA EL GRUESO.
+  156  punteros al array de edicts EN LAS ENTVARS (offset 0x208, el
+       pContainingEntity: cada entidad apunta a su propio edict). Las
+       entvars no se escaneaban en absoluto, solo los bloques privados.
+  308  punteros a una estructura del motor en el hunk (0xa2a1168 en esa
+       corrida, la misma para todas las entidades), 156 en las entvars y
+       152 en los bloques privados.
+
+EL ERROR DE PARTIDA ESTABA EN EL APARTADO 6 DE ESTAS NOTAS
+  Decia: "la vtable (offset 0) se restaura sola porque la DLL carga en
+  base fija 0x10000000". Es FALSO. hl.dll trae tabla de reubicaciones
+  (.reloc, 0x3b5e bytes) y Windows la coloca donde le parece. Bases vistas
+  en cuatro arranques seguidos:
+
+      0x1f160000   0x3daf0000   0x3d5f0000   0x3d5c0000
+
+  O sea que cambia en CADA arranque, no solo al reiniciar. Comprobado sin
+  depurador: el dword del offset 0 del bloque privado del mundo valia
+  0x1f18c1d8 en el .sav viejo, y con base 0x1f160000 eso es la rva
+  0x2c1d8, que en hl.dll cae en .rdata y tiene el Save comun (0x10001810)
+  en el slot +0xc. Es una vtable, y la base de esa corrida iba dentro.
+
+ARREGLO (formato CLDX version 3)
+  1. Se escanean tambien LAS ENTVARS, no solo los bloques privados.
+  2. Dos clases nuevas de reubicacion:
+       clase 3 (hl.dll): se guarda el offset dentro del modulo y al cargar
+                se rehace sobre la base que tenga hl.dll AHORA.
+       clase 4 (vivo):   punteros al hunk del motor que no sabemos
+                nombrar. No se pueden recalcular, asi que al cargar se
+                deja el valor que tiene el mapa RECIEN ARRANCADO, que si
+                apunta a las estructuras de esta sesion. Para eso la
+                restauracion toma una copia de los bloques privados
+                ANTES de destruirlos.
+  3. La cabecera guarda la base de hl.dll de esa sesion, solo para la
+     traza: en el log se ve "al guardar=... ahora=... (MOVIDA)".
+  4. Los punteros a datos estaticos del .exe se dejan tal cual: el
+     ejecutable no tiene reubicaciones y siempre carga en 0x400000. Ahi
+     viven las cadenas, que ademas ya viajaban como texto.
+
+  Como reconocer un puntero al hunk sin confundirlo con un float: solo se
+  acepta si cae en una ventana de 1 MB alrededor del array de edicts y si
+  VirtualQuery dice que hay memoria comprometida. Los que se han visto
+  caen a menos de 2 KB del array, y la ventana estrecha deja fuera el
+  rango de los floats normales de un mapa (coordenadas, tiempos).
+
+  Los .sav de la version 2 ya no se cargan: no tienen la informacion para
+  recolocar nada. El juego lo dice y hay que rehacerlos.
+
+LA PRUEBA (c1a1, dos procesos distintos, 22-09-2026)
+  Proceso 1:  +map c1a1, esperar, "save zfria", "quit"       -> exit 0
+  Proceso 2:  "load zfria", esperar, "screenshot", "quit"    -> exit 0
+
+      AL GUARDAR             t=4697ms vida=100 org=(-28 1260 -299)
+      MAPA RECIEN ARRANCADO  t=1200ms vida=  0 org=(  0    0    0) priv=0
+      CLIENTE YA DENTRO      t=1413ms vida=100 org=(-28 1260 -271)
+      TRAS CARGAR            t=4697ms vida=100 org=(-28 1260 -299)
+
+      restaurar: hl.dll al guardar=0x3d5f0000, ahora=0x3d5c0000 (MOVIDA)
+      restaurar: punteros rehechos: edict=310 privado=0 hl.dll=260 vivo=310
+                 (sin copia=0 descartados=0)
+      restaurar: contenido de los bloques privados: 153 comparados, 0 distintos
+
+  La linea del contenido es la que manda ahora. La suma de control de
+  antes ya no sirve para cargar en frio: los punteros son legitimamente
+  distintos, asi que la suma TIENE que cambiar. Lo que se compara es el
+  bloque del fichero contra el de memoria CERANDO los dwords que llevan
+  reubicacion: todo lo que no es puntero sale igual byte a byte en los
+  153 bloques, y los punteros salen recalculados. Eso si discrimina.
+
+  Ademas el juego siguio vivo cientos de fotogramas despues de restaurar
+  (escribio la captura valve\quake00.tga: mapa dibujado, HUD con la vida
+  a 100 y el cientifico animandose, o sea que las vtables funcionan) y
+  salio con "quit" limpiamente, cosa que antes tampoco pasaba.
+
+COMO REPETIR LA PRUEBA
+  valve\zguardar.cfg  waits + "save zfria" + waits + quit
+  valve\zcargar.cfg   waits + "load zfria" + waits + screenshot + waits + quit
+  Lanzar cada uno en su proceso, desde PowerShell con Start-Process (ver
+  apartado 12), con:
+    -heapsize 524288 -condebug -width 800 -bpp 32 +maxplayers 1 +sizedown
+  El de cargar NO lleva "+map": el load ya encola el mapa.
+
+QUEDA PENDIENTE (sin tocar)
+  - Mapa que arranque con un numero de entidades distinto al guardado
+    (haria falta SV_LinkEdict / SV_UnlinkEdict, sin localizar).
+  - Lightstyles y globales de progs.
+  - El aviso cosmetico "maxplayers can not be changed while a server is
+    running".
+
+
+14. CRASH EN EL DIBUJADO DE DECALS: ARREGLADO (23-09-2026)
+---------------------------------------------------------------------
+RESUMEN: bug del motor de 1997, no de hlsave.dll. Con mas de 500
+superficies con calcomania (agujeros de bala, sangre, quemaduras) a la
+vista, el motor escribia fuera de una lista fija y acababa petando.
+
+EL CRASH
+  23-09-2026 20:03:39, c0000005 en enginegl-carga.exe+0x3881d
+  (0x43881d, mov ecx,[eax] del bucle que dibuja las decals, con
+  glPolygonOffset). En esa partida no se guardo ni se cargo nada:
+  hlsave.log solo tiene el arranque.
+
+EL BUG
+  Lista de superficies con decal: 500 punteros en 0x819bb8, contador en
+  0x819bb0 (se pone a 0 cada frame en 0x43752c y tras dibujar en
+  0x438a41). La rutina que añade (0x436b91) incrementa el contador,
+  ESCRIBE la entrada y solo despues compara con 500; al pasarse saca
+  "Too many decal surfaces!" (0x46a170) por Con_Printf (0x40a559, no
+  es fatal) y sigue. Cada superficie extra machaca un dword mas de lo
+  que hay detras de 0x81a388.
+
+EL ARREGLO (parchear.ps1, estatico, 38 bytes en 0x436b91)
+  mov eax,[0x819bb0] / cmp eax,500 / jge 0x436bb7 /
+  mov [eax*4+0x819bb8],esi / inc eax / mov [0x819bb0],eax / 13 nops
+  Llena la lista, la superficie sobrante no se dibuja ese frame. El
+  aviso se ha quitado: con el salto de vuelta no cabia en los 38 bytes.
+  El script comprueba los bytes originales antes de parchear.
+
+
+15. LA CRUCETA NO ESTABA EN EL PUNTO DE MIRA: ARREGLADO (23-09-2026)
+---------------------------------------------------------------------
+SINTOMA: los disparos (probado con la pistola) salen un poco por
+encima de la cruceta. No es cosa del arma: es la cruceta la que esta
+mal puesta, asi que afecta a todas.
+
+LA CAUSA
+  El motor pinta todo en una pantalla virtual de 320x200 (vid en
+  0xd3b424/0xd3b428 = 320,200; R_SetupGL en 0x421f28 lleva el 320 y el
+  200 a fuego) que se estira a la resolucion real. La vista 3D ocupa la
+  pantalla entera (vrect 0x0c67660 = 0,0,320,200; sb_lines 0), asi que
+  se apunta al centro exacto: (400,300) a 800x600.
+  La cruceta (cvar "crosshair", struct en 0x46b638) se pinta con
+  Draw_Character(vrect.x + w/2, vrect.y + h/2, '+'): la ESQUINA de la
+  celda en el centro, y el '+' de conchars cae en la parte baja de su
+  celda. Estirado x2,5 / x3, el dibujo quedaba en (406, 319.5): 20 px
+  por debajo y 6 a la derecha del punto de mira real.
+
+EL ARREGLO (parchear.ps1, estatico, en 0x42bcf7 y 0x43d982)
+  Los dos sitios que pintan la cruceta hacen cdq/sub eax,edx/sar eax,1
+  para dividir entre 2; como w y h son positivos el cdq/sub no hace
+  nada, y en su hueco se resta 14 a h y 6 a w: centro -7 y -3 en
+  unidades virtuales. Medido en captura a 800x600: brazo horizontal en
+  la fila 299, vertical a 1 px a la izquierda del centro. Al ir en
+  unidades virtuales vale igual para cualquier resolucion.
+
+
+16. LOS DISPAROS SE DESVIABAN SEGUN HACIA DONDE MIRAS: ARREGLADO (23-09-2026)
+-----------------------------------------------------------------------------
+SINTOMA (visto jugando, tras centrar la cruceta del apartado 15): mirando
+arriba el tiro va por debajo de la cruceta, mirando abajo por encima,
+recto va bien. Y siempre un poco a la derecha.
+
+CAUSA 1, LA GORDA: LOS ANGULOS VIAJAN TRUNCADOS
+  CL_SendMove (0x40be7f) manda cl.viewangles (0x8493d8) con
+  MSG_WriteAngle (0x42ef75) = ((int)f * 256 / 360) & 255, el de Quake:
+  un byte (pasos de 1,40625 grados) y TRUNCANDO dos veces. El servidor
+  dispara con ese v_angle. El giro esta siempre en 0..360, asi que
+  truncar lo baja = gira a la derecha (hasta 1,4 grados). El cabeceo
+  trunca hacia 0 = hacia el horizonte: mirando abajo (positivo) el tiro
+  sube, mirando arriba baja. Justo el sintoma.
+  Arreglo (parchear.ps1): 0x42ef75 salta al hueco 0x4564c0, que hace
+  trunc(f*256/360 + 256.5) (el +256 lo deja positivo para que truncar
+  sea redondear); MSG_WriteByte (0x42ee95) solo guarda el byte bajo.
+  Medido en juego: cliente 49,130 -> servidor 49,219 (antes 47,8);
+  cliente (-1,056 359,072) -> servidor (-1,406 358,594).
+
+CAUSA 2, PEQUEÑA: LA BALA NO SALIA DEL OJO
+  FireBullets de hl.dll (0x100103f0) usaba de origen
+  origin + v_forward*10 en x,y y origin.z + view_ofs.z - 4 en z. Es un
+  desplazamiento paralelo de unas pocas unidades que tambien cambia con
+  el cabeceo. Arreglo en hl.dll (lo regenera parchear.ps1 desde
+  hl-original.dll, copia intacta del de fabrica): los tres fld de
+  v_forward pasan a fldz y el fsub 4.0 a fcom 4.0. Solo se tocan
+  opcodes: hl.dll se reubica en cada arranque y los operandos de
+  direccion llevan entrada de reubicacion.
+
+DESCARTADO
+  - La pistola apunta con v_angle (entvars +0x160), no con angles (que
+    lleva el cabeceo /3 para el modelo). Offsets reales, leidos de la
+    tabla de campos en vivo: angles 0x4c, punchangle 0x70, view_ofs
+    0x148, fixangle 0x15c, v_angle 0x160.
+  - La direccion sale de aim() (funcion 30 de la tabla del motor,
+    0x40367c), el autoapuntado de Quake, pero sv_aim vale "1" de fabrica
+    y con eso no desvia nada.
+  - RANDOM_FLOAT de la dispersion es simetrico.
+
+OJO CON LAS PRUEBAS AUTOMATICAS
+  - El cfg tiene que ir con LF: con CRLF (Set-Content de PowerShell)
+    las ordenes no se reconocen.
+  - Maximo ~8 KB de cfg: si no, "Cbuf_AddText: overflow" y no se
+    ejecuta nada. 2000 waits ya no caben.
+  - Con +lookdown/+lookup en el cfg si se mueve la vista (sirve para
+    probar el cabeceo sin raton).
+
+AMPLIACION (mismo dia): ANGULOS DEL CLC_MOVE EN 16 BITS
+  Jugando seguia descentrado ("ahora dispara arriba siempre"). Medido:
+  la camara (r_refdef.vieworg 0xc676d0, viewangles 0xc676dc) esta en el
+  ojo del servidor (origin + view_ofs) a 0,1 unidades, quieto y andando,
+  y sus angulos son los de cl.viewangles. Lo unico que quedaba era el
+  byte: aun redondeando, pasos de 1,4 grados = hasta 0,7 de error
+  (cliente 18,774 -> servidor 18,281: medio grado mas arriba).
+  Arreglo, como hizo Half-Life despues: el clc_move lleva los angulos en
+  16 bits. CL_SendMove (call en 0x40bed6) -> WriteAngle16 en 0x4564f0
+  (round(f*65536/360), MSG_WriteShort 0x42eeaa); SV_ReadClientMove
+  (call en 0x418518) -> ReadAngle16 en 0x456530 (MSG_ReadShort 0x42f00d
+  * 360/65536). El resto de mensajes siguen con MSG_WriteAngle/ReadAngle
+  de un byte (redondeando). Medido: 18,7679 -> 18,7701; 244,2371 ->
+  -115,7629 (= 244,2371). El servidor ya recibia -180..180 con el byte
+  con signo, asi que para hl.dll no cambia el formato.
+  Los agujeros de bala en pruebas recto contra pared: a menos de 10 px
+  del centro y en direcciones distintas, es la dispersion de la pistola
+  (vector 0,01 = unos +-4 px a 800x600).
+
+
+17. MENU DE PARTIDAS: ETIQUETAS Y RANURA DEL GUARDADO RAPIDO (24-09-2026)
+-------------------------------------------------------------------------
+SINTOMA: el guardado rapido (F6, "save quick") funcionaba pero no salia
+en el menu de cargar (F3), y el menu enseñaba "3 partidas" que no eran
+la tuya.
+
+CAUSA
+  El menu (M_ScanSaves, 0x41c434) solo mira s0..s11.sav y los lee como
+  .sav de Quake: fscanf "%i" (version) y "%79s" (comentario). Los de la
+  alpha empiezan por la cabecera binaria de HL ("VALV" 0x10 0 0 0 ...),
+  asi que todas las ranuras salian como "VALV" + basura. Las 3 que salian
+  eran s0..s2.sav, las de fabrica (1997, ~66 KB, guardado roto original,
+  sin bloque CLDX): no se pueden cargar con hlsave.
+  Guardar/cargar desde el menu manda "save sN"/"load sN", o sea el mismo
+  comando enganchado que el rapido: el guardado manual ya era completo.
+
+ARREGLO (hlsave.dll)
+  - Los jmp finales de M_Menu_Load_f (0x41c543) y M_Menu_Save_f
+    (0x41c581) van a mi_scan: llama al M_ScanSaves original y reescribe
+    cada etiqueta (m_filenames 0xc67e40, 12 x 40) con el mapa del bloque
+    CLDX y la fecha del fichero. Las que no tienen bloque CLDX v3 salen
+    "(antigua, no se puede cargar)" y loadable[] (0xc67dd0) = 0.
+  - La ranura 12 (s11) es la del guardado rapido: en autoexec.cfg F6 =
+    "save s11" y F7 = "load s11" (antes "quick"). Se ve como
+    "RAPIDA <mapa> <fecha>". El quick.sav antiguo se copio a s11.sav.
+    Ojo: guardar a mano en la ultima ranura pisa el rapido y viceversa.
+
+
+CORRECCION AL APARTADO 14 (24-09-2026)
+  0x40a559 NO es Con_Printf: es el error fatal del motor (la ventana
+  "Engine Error"; Con_Printf es 0x41754e). O sea que "Too many decal
+  surfaces!" paraba el juego, pero la entrada 501 ya se habia escrito
+  fuera de la lista antes, y por eso petaba antes con un acceso invalido.
+  El parche no cambia: ahora nunca se llega ahi.
+
+
+18. SALIDAS A MAPAS QUE LA ALPHA NO TRAE (24-09-2026)
+------------------------------------------------------
+SINTOMA: en una transicion el juego se queda "pensando" para siempre;
+algo de "error al cargar c1a1c".
+
+CAUSA: la alpha 0.52 no trae c1a1c.bsp (tampoco la copia original de
+lan Party), pero c1a1a tiene un trigger_changelevel (*15) hacia el. Lo
+mismo c3a2 -> c3a3. Todas las demas transiciones de todos los mapas van
+a mapas que existen. pfnChangeLevel (0x40403a) pone changelevel_issued
+(0xc60a00) y scr_disabled_for_loading (0xc6544c) a 1, congelando la
+imagen; luego el mapa no aparece y, o sale el error fatal en un
+MessageBox escondido tras la pantalla completa, o la imagen se queda
+parada 60 s hasta "load failed.".
+
+ARREGLO (hlsave.dll): los comandos changelevel (0x42cbed, push en
+0x42e7a4) y changelevel2 (0x42d57b, push en 0x42e7b6) pasan por
+mi_changelevel*: si maps/<mapa>.bsp no existe, se ignora, se ponen las
+dos marcas a 0 (si no, las demas salidas del mapa dejarian de funcionar
+hasta cargar otro nivel) y se avisa por consola cada 5 s como mucho.
+Probado: changelevel c1a1c ignorado y las marcas a 0.
+
+OJO PARA PROBAR: "changelevel <mapa>" escrito a mano en la consola peta
+en hl.dll+0xb92d (SetChangeParms escribe por un puntero nulo) TAMBIEN
+con el exe y el hl.dll originales. Bug de 1997; jugando no pasa porque
+el cambio lo dispara el trigger. No sirve para probar transiciones.
+
+
+19. "SZ_GetSpace: overflow without allowoverflow set" (24-09-2026)
+------------------------------------------------------------------
+SINTOMA: Engine Error disparando a 3-4 perros y un cangrejo a la vez.
+
+CAUSA: SZ_GetSpace (0x42f1da, la de Quake) llama al error fatal si un
+bufer sin allowoverflow se llena. Los del servidor no lo tienen:
+sv.datagram 0xc61d0c (MSG_BROADCAST, 1 KB por fotograma),
+sv.reliable_datagram 0xc62120 (MSG_ALL), sv.signon 0xc62534 (MSG_INIT).
+Los de cada cliente si, y al llenarse se vacian y el juego sigue.
+Quake protegia sus propias escrituras al datagram; los mensajes de
+hl.dll no pasan por esas comprobaciones.
+
+ARREGLO (hlsave.dll): la llamada al error en 0x42f1fb va a sz_desborde
+(puente en ensamblador: pasa ebx, el sizebuf), que apunta en hlsave.log
+que bufer se lleno (una vez por bufer) y vuelve; el codigo original
+sigue por el camino de allowoverflow: vacia el bufer, lo marca y dice
+"SZ_GetSpace: overflow". Se pierden los efectos de ese fotograma.
+PENDIENTE: no reproducido aun. Cuando vuelva a pasar, hlsave.log dira
+cual era; si es sv.signon (acumula todo el mapa) habria que agrandarlo
+en vez de vaciarlo.
+
+AMPLIACION (mismo dia): LA SALIDA A c1a1c LLEVA AL CAPITULO 2
+  Pedido del usuario: en vez de ignorar la salida, ir al siguiente
+  capitulo. No se puede hacer lanzando otro changelevel/changelevel2:
+  escritos a mano petan en hl.dll+0xb92d (SetChangeParms) tambien con el
+  juego original, porque el puntero de parametros (+0xb0) solo esta
+  puesto cuando el cambio sale de un trigger. Se hace en pfnChangeLevel,
+  la funcion que llama hl.dll al tocar el trigger (entrada 5 de la
+  tabla 0x45c1a0, 0x40403a): si el mapa falta y esta en la tabla
+  capitulos[] de hlsave.c, se cambia solo el nombre y sigue el camino
+  normal (se conservan vida y armas).
+    c1a1c -> c1a2a
+    c3a3  -> (nada: c3a2a es el ultimo mapa; se sigue ignorando)
+  Probado sin teclado: se escribe en memoria el origin del jugador en el
+  centro del trigger *15 de c1a1a (bounds del lump de modelos del bsp:
+  x -44..74, y 2610..2618, z -118..-96). Resultado: mapa c1a2a, sin
+  crash, con la pistola.
+
+
+20. LA SALIDA A c1a1c NO HACIA NADA EN UNA PARTIDA GUARDADA (24-09-2026)
+-------------------------------------------------------------------------
+SINTOMA (jugando): llegas al final de c1a1a, cruzas la puerta doble
+"dough1" y no pasa nada; ni siquiera sale la linea de "changelevel" en
+hlsave.log.
+
+CAUSA: trigger_changelevel de hl.dll se APAGA el solo en cuanto lo
+pisas, antes de pedir el cambio (0x1001c166: pev->solid = SOLID_NOT y
+m_pfnTouch, +0x10 del bloque privado, a nulo). En esa partida el
+jugador ya lo habia pisado cuando la salida a c1a1c aun se ignoraba (la
+linea "changelevel a c1a1c ignorado" del log, en juego real). El cambio
+no se hizo, el trigger quedo apagado, se guardo asi, y todas las
+partidas guardadas despues lo llevaban muerto (visto en el .sav: edict
+20, solid 1 en quick.sav a t=37 s y solid 0 en s11.sav; toque a 0).
+Campos del bloque privado: +0x10 toque, +0x80 char[] del mapa destino.
+
+ARREGLO (hlsave.dll, rearmar_salidas): al cargar, todo
+trigger_changelevel con solid 0 y toque nulo se rearma con el toque que
+tenia el mismo edict en el mapa recien arrancado (copia_viva; se
+comprueba que la vtable coincide), solid = SOLID_TRIGGER y
+SV_LinkEdict (0x42a218, localizado: SetSize 0x401b15 lo llama al final).
+Es seguro rearmar todos: un cambio de nivel que SI se hace carga otro
+mapa, asi que un trigger apagado dentro de un guardado es siempre un
+cambio fallido.
+
+PROBADO (automatico): load s11 -> "salida a c1a1c (edict 20) estaba
+apagada, rearmada"; luego, desde un guardado junto a la puerta,
++moveleft hasta el trigger -> "redirigido a c1a2a" y carga c1a2a.
+(Aviso "Can't init monster_human_assault" al cargar c1a2a: la clase no
+existe en el hl.dll de la alpha; es del mapa, no de esto.)
+
+
+21. EL BALANCEO PEGADO, CAUSA DE VERDAD: svc_setangle (24-09-2026)
+------------------------------------------------------------------
+SINTOMA (jugando): atascado en una puerta que te hace daño, la camara
+se tuerce; si guardas asi y cargas, empiezas torcido y no se endereza.
+El log lo confirma: v_angle con balanceo -4 y luego -8 en todas las
+partidas guardadas desde entonces.
+
+CAUSA: el arreglo del apartado 11 ponia angles[2] a 0 al cargar, pero
+no bastaba. Antes de que salga el svc_setangle, SV_ClientThink vuelve a
+calcular angles[ROLL] = V_CalcRoll(velocidad) * 4 (el balanceo del
+MODELO, para que lo vean los demas). Si el guardado lleva velocidad
+lateral -- andar de lado, o la puerta empujandote --, el cliente recibe
+ese balanceo (hasta 2 x 4 = 8 grados). Y svc_setangle (0x439bec) copia
+los tres angulos en cl.viewangles (0x8493d8), cuyo balanceo nadie mas
+toca: se queda para siempre. No es el daño en si: el punch del daño
+(punchangle, que hl.dll pone a +-7 en 0x1000b1f3) si se amortigua solo
+(DropPunchAngle 0x417f45). Lo que ata el balanceo a la puerta es que
+empuja al jugador de lado.
+
+ARREGLO (parchear.ps1): al final del case svc_setangle (jmp en
+0x439c03) se salta a un hueco (0x456560) que pone cl.viewangles[ROLL]
+a 0 y vuelve a 0x439a76. El balanceo de la vista al andar lo suma el
+dibujado aparte y no pasa por ahi. Vale para cualquier fixangle, no
+solo para cargar.
+
+PROBADO (automatico): guardar con +moveleft pulsado y cargar ese
+guardado: v_angle sale (0 1 0) al volver a guardar, con el jugador aun
+deslizandose de lado tras la carga. Antes salia -4/-8.
+
+
+22. LA SALIDA A c1a1c SE PASABA AGACHADO (24-09-2026)
+-----------------------------------------------------
+SINTOMA (jugando): agachado se cruza la puerta doble del final de c1a1a
+sin cambiar de mapa.
+
+CAUSA: el trigger *15 es una franja de 22 unidades (z -118..-96) en lo
+alto del hueco, que va de -166 a -38 (las dos hojas de "dough1").
+Agachado, la caja del jugador pasa por debajo.
+
+ARREGLO (hlsave.dll, estirar_salidas): al final de cada "begin" (entrar
+en un mapa, y tambien despues de cargar, que repone los mins/maxs del
+guardado), en c1a1a el trigger_changelevel hacia c1a1c pasa a mins/maxs
+z -170..-34 y se vuelve a enlazar con SV_LinkEdict. El toque de los
+triggers en SV_TouchLinks es solo solape de cajas, asi que basta con
+eso. Tabla salidas_estiradas por si aparece otro caso.
+
+PROBADO (automatico): load s11 -> "salida a c1a1c (edict 20) estirada a
+z -170..-34"; con +duck y +moveleft hasta la salida -> redirigido a
+c1a2a y carga el mapa.
+
+
+23. CANGREJO CON UN CAMPO DE PARTICULAS ALREDEDOR (24-09-2026)
+--------------------------------------------------------------
+SINTOMA (jugando, c1a2b): un cangrejo (luego su cadaver) lleva alrededor
+un "sprite" raro.
+
+CAUSA: no es de la carga, es de hl.dll y viene de fabrica. Al arrancar
+un monstruo (0x10011ff0) se comprueba si puede moverse en su sitio; si
+no, avisa "Monster %s stuck in wall--level design error" (0x1002efec) y
+le pone effects = EF_BRIGHTFIELD (0x1001207a), el campo de particulas
+de Quake, como marca de depuracion para el mapeador. El Half-Life final
+hace lo mismo. En c1a2b es el cangrejo del mapa en (602 -38 124); se
+solto, ataco y murio, y la marca siguio en el cadaver (edict 147 del
+s11, effects 1). Campos, sacados de valve\progs.dat (ddef con nombres):
+effects 0x8c, sequence 0x9c, frame 0xa4, groundentity 0xec.
+
+ARREGLO:
+  - parchear.ps1, en hl.dll: el mov dword [ecx+0x8c], 1.0 guarda 0.0 (se
+    cambia solo el inmediato, que no lleva reubicacion). El aviso sigue.
+  - hlsave.dll (quitar_marcas_atasco): al cargar se quita el bit
+    EF_BRIGHTFIELD de todas las entidades, para los guardados que ya lo
+    llevan. Nada mas en la alpha usa ese efecto.
+
+PROBADO (automatico): load s11 -> "quitado el campo de particulas
+(monstruo atascado) al edict 147"; captura mirando al cadaver: sin
+particulas.
+
+
+24. PAREDES QUE NO SE DIBUJAN HASTA ACERCARTE (24-09-2026)
+----------------------------------------------------------
+SINTOMA (jugando, c1a2b): la pared del fondo de un pasillo no se dibuja
+(se ve a traves, con restos de fotogramas anteriores: "salon de los
+espejos"); al acercarte aparece.
+
+CAUSA: los datos de visibilidad (PVS) del propio mapa. Comprobado en el
+.bsp (lumps 1 planos, 4 visibilidad, 5 nodos, 10 hojas; bit de la hoja
+N en la posicion N-1 de la fila RLE): desde el ojo del guardado
+(722 -626 122) mirando al norte, la hoja del ojo es la 579 y la recta
+pasa por 578, 287, 397 y 396 (visibles) hasta la 394, que tiene la
+pared y esta marcada NO visible. Asi que el vis del mapa se compilo mal
+en 1997; el motor hace lo que debe. Con r_novis 1 se dibuja bien.
+
+ARREGLO: "r_novis 1" al principio de valve\autoexec.cfg: el cliente
+dibuja el mundo sin mirar el PVS (con mapas de 1997 no se nota).
+
+LIMITE: r_novis solo afecta al dibujado del mundo. El servidor sigue
+usando el PVS para decidir que entidades manda al cliente, asi que un
+monstruo que este en una hoja "mal vista" podria no verse hasta
+acercarte. Quitarlo tambien en el servidor mandaria todas las entidades
+en cada paquete y desbordaria el datagrama (1 KB). Si aparece, mirar
+de rehacer el PVS al cargar el mapa (p. ej. hacerlo simetrico).
+
+
+25. CAIDA DE FPS MIRANDO HACIA CIERTAS ZONAS: EL MINIGL + nGLIDE (24-09-2026)
+-----------------------------------------------------------------------------
+SINTOMA (jugando, c1a2b): mirando en una direccion el juego va a
+tirones en un PC moderno; mirando hacia atras, perfecto.
+
+CAUSA: la cadena de video. El motor importa OPENGL32.dll y Windows lo
+busca primero en la carpeta del juego, donde esta el Opengl32.dll de
+3Dfx (MiniGL, importa glide2x.dll), y glide2x.dll es nGlide (Zeus
+Software; emula Glide sobre Direct3D 9). Medido con r_speeds 1 en el
+mismo guardado y la misma vista:
+    MiniGL + nGlide : 30-39 ms por fotograma, 1614 wpoly
+    OpenGL nativo   : 1-2 ms por fotograma,  1574 wpoly
+No es el r_novis del apartado 24: con r_novis 0 y 1 salen los mismos
+~1600 poligonos y los mismos 30-39 ms.
+Con el nativo el dibujado es correcto (texturas, luz, HUD). OJO: las
+capturas (screenshot) salen ya al derecho, NO hace falta el vflip del
+apartado 12; con el MiniGL si.
+
+ARREGLO (lanzador): el modo de video [V] pasa a tener tres opciones:
+OpenGL nativo (por defecto), OpenGL 3Dfx/nGlide y software. Para el
+nativo, :lanzar renombra Opengl32.dll a Opengl32-3dfx.dll; para el
+3Dfx lo devuelve. Si estan los dos a la vez avisa y no toca nada.
+Probada la logica de :video/:setrender/:lanzar aparte, con un
+Opengl32.dll falso (set /p con la entrada por tuberia no sirve para
+probar el menu: se come toda la entrada en la primera lectura). El .bat
+queda entero en CRLF (antes mezclaba CRLF y LF).
+Nota: con el MiniGL apartado, "Half-Life GL Launcher.bat" (el original)
+tambien usa el OpenGL nativo.
+
+
+26. CARGAR (F7) DESDE UNA PARTIDA MULTIJUGADOR PETABA (24-09-2026)
+-------------------------------------------------------------------
+SINTOMA (jugando): con una partida multijugador empezada desde el menu,
+F7 (load s11) acaba en un error del motor "de clipping".
+
+CAUSA: la carga encola "maxplayers 1" + "map <mapa>", pero con un
+servidor en marcha Host_Maxplayers_f (0x427cbd) se niega: "maxplayers
+can not be changed while a server is running." (mira sv.active,
+0xc60f10). El mapa arrancaba entonces para varios jugadores: los edicts
+1..maxclients son de los jugadores y todo lo demas queda desplazado
+respecto al guardado de un jugador. El log lo delataba: 7 descuadres
+ocupado/libre y 6 punteros VIVO sin copia, en vez de 4 y 0. Se volcaba
+el guardado con las entidades cruzadas y petaba al calcular choques.
+
+ARREGLO (hlsave.dll):
+  - mi_load encola "disconnect" antes de "maxplayers 1": disconnect
+    (0x43e35e) desconecta el cliente y, si hay servidor, lo apaga.
+  - Red de seguridad en mi_restaurar: si svs.maxclients (0xc609f0, lo
+    escribe Host_Maxplayers_f en 0x427d69) no es 1, no se toca nada.
+
+PROBADO (automatico): "maxplayers 4" + "map c1a1a", luego "load s11":
+arranca c1a2c para un jugador, restaura con 4 descuadres y 0 sin copia
+(como una carga normal) y luego "save" funciona (el motor solo deja
+guardar con un jugador).
+
+
+27. EL JUGADOR LLEGA PARADO TRAS UN CAMBIO DE NIVEL (24-09-2026)
+----------------------------------------------------------------
+SINTOMA (jugando): al pasar una transicion se pierde la inercia.
+
+COMO PASA LA ALPHA AL JUGADOR DE UN MAPA A OTRO: al pisar el
+trigger_changelevel (0x1001c0xx) reserva una estructura de 0x78 bytes,
+la cuelga del edict del jugador (+0xb0) y busca un info_landmark a
+menos de 256 u; en ella guarda el nombre del landmark (+0x34), la
+posicion respecto a el (+0x48), la velocidad (+0x54), los angulos
+(+0x60) y la vista v_angle (+0x6c), con los dos balanceos a 0.
+SetChangeParms (0x1000b8c0) mete ahi tambien vida, armas, etc. En el
+mapa nuevo el Spawn del jugador (bloque de 0x1000b634) busca el landmark
+por nombre y repone posicion, angulos y vista (cabeceo cambiado de
+signo)... y salta al final (jmp 0x1000b7de) SIN tocar la velocidad.
+Fallo de la alpha: la guarda pero no la usa.
+
+ARREGLO (parchear.ps1, sobre hl.dll): no hay hueco libre de 26 bytes
+en .text, asi que se reescribe el propio bloque de la vista
+(0x1000b6dc, 51 bytes, sin entradas de reubicacion) mas compacto:
+cabeceo con xor al bit de signo en vez de fld/fchs/fstp y sin copiar el
+balanceo (el trigger lo deja a 0); en lo que sobra, velocidad de la
+estructura a pev->velocity (+0x40). Solo registros y el jmp relativo
+de antes, porque hl.dll se reubica.
+
+hlsave.dll anota ahora en cada entrada a un mapa que no sea una carga
+"entrada en <mapa>: org=(...) velocidad=(...)".
+
+PROBADO (automatico): map c1a2c, +moveleft hasta la salida a c1a2b
+(landmark ctob1/b1toc). Con el bloque original: "entrada en c1a2b ...
+velocidad=(0 0 0)". Con el parche: "velocidad=(0 320 0)".
+
+
+28. LOS CIENTIFICOS CORREN EN EL SITIO AL SEGUIRTE (24-09-2026)
+---------------------------------------------------------------
+SINTOMA (jugando, tambien sin cargar nada): pulsas E con un cientifico
+(el primero de c1a1), te alejas y se queda con la animacion de correr
+sin moverse; si le disparas una vez, "se desbloquea" y te sigue.
+
+COMO SE DIAGNOSTICO: enganche temporal a MoveToOrigin (entrada 11 de
+la tabla del motor, 0x405bd9, la que usa hl.dll para mover monstruos)
+que anotaba cada intento de un cientifico: atascado, NI UN intento en
+18 s; tras el disparo, uno cada 0,1 s y avanzando. La animacion la
+reproduce el motor solo (framerate), aunque la IA no haga nada. El
+usuario dejo un guardado en el estado malo ("save atascado") y con el
+se reproduce siempre.
+
+CAUSA: el think de los monstruos (0x10012430, se reprograma cada 0,1 s)
+reparte por estado en un switch (0x1001263c; +0x80 del bloque privado
+es el estado, 10 = seguir al objetivo de +0x13c: si esta a mas de +0x104
+= 128 u, MoveToOrigin hacia el con la distancia de +0x10c). Pero antes,
+si no tiene enemigo, busca un jugador a la vista (entrada 17 de la
+tabla + comprobaciones de visibilidad y cono de vision) y le pregunta
+la relacion con una virtual (+0x24 de la vtable). El cientifico
+devuelve siempre 5 (0x10005360: mov eax,5), y con 5 el think SALIA
+(je 0x10012fec, en 0x10012589) sin pasar por el switch. O sea: mientras
+te ve, no te sigue. Con un enemigo (el disparo) toma otro camino que si
+llega al switch.
+
+ARREGLO (parchear.ps1, sobre hl.dll): ese je va a 0x10012638 (el
+switch), como cuando no ve a nadie. Solo cambia el desplazamiento del
+salto (0f 84 5d 0a 00 00 -> 0f 84 a9 00 00 00; relativo, sin
+reubicacion).
+
+PROBADO: load atascado -> el cientifico echa a andar hacia el jugador
+desde el primer think (36 pasos en 400 fotogramas); sin el parche, 0.
+Datos del bloque privado de los monstruos usados aqui: +0xc think
+(0x12430 = el de monstruo), +0x80 estado, +0xe8 destino, +0x104
+distancia para dejar de seguir, +0x10c distancia por paso (22,16
+corriendo, 4,78 andando), +0x13c objetivo.
+
+NOTA PARA LAS PRUEBAS: "quit" desde un cfg con el juego en primer plano
+pide "press Y to exit"; hay que poner "toggleconsole" antes.
+
+
+29. GUARDAR TRAS CAMBIAR DE ARMA: "NUM_FOR_EDICT: Bad pointer" (24-09-2026)
+---------------------------------------------------------------------------
+SINTOMA: cualquier "impulse" de arma (1-8) y luego guardar -> Engine
+Error "NUM_FOR_EDICT: Bad pointer". Sin tocar el arma guarda bien. Es
+de la alpha, no de los parches.
+
+CAUSA: el progs.dat declara como tipo "entity" campos que hl.dll usa como
+enteros: sequence, controller, blending, weapon, weapons, ammo_1..4,
+items, items2, button (ademas de los entity de verdad: groundentity,
+chain, enemy, aiment, goalentity, dmg_inflictor, owner). Al guardar, el
+motor convierte cada campo entity en numero de edict. Con valores
+pequenos cuela; pero "weapon" lleva en los bytes altos el estado del
+cambio de arma (0x0002_07_01...) y la conversion se sale de rango.
+
+ARREGLO (hlsave.dll, arreglar_tipo_weapon, en cada "begin" porque los
+progs se cargan con cada mapa): el tipo de "weapon" pasa en memoria a
+float. El texto del .sav lleva un numero inocuo y la carga repone el
+valor exacto desde el bloque CLDX. No se toca el progs.dat ni los demas
+campos (nunca llevan valores tan grandes y alguno, como sequence, puede
+venir de los mapas).
+PROBADO: impulse 1/2/3 + save tras cada uno + load + save: todo "done".
+
+
+30. CAMBIO DE ARMA DIRECTO CON 1-8 (24-09-2026)
+-----------------------------------------------
+ANTES: en la alpha el numero solo PRESELECCIONA (como el menu de armas
+del HL final). SelectWeapon (0x1000f980, impulse 1-8) deja
+weapon = (anterior << 16) | (7 << 8) | N (si no tienes el arma N, la
+siguiente que tengas); se confirmaba con el disparo principal (+attack,
+bit de boton 0x1: el think del jugador, 0x10011316, deja weapon = byte 0
+y llama a 0x10010990, que pone el modelo), y se cancelaba con el bit
+0x40. Numeros de arma: 1 palanca, 2 pistola, 4 MP5 (el 3 no existe;
+impulse 3 salta a la 4); weapons = mascara de bits (0b10111).
+Bits de boton del cliente (CL_SendMove 0x40bf27..): +attack 0x1, +jump
+0x2, +duck 0x4, +use 0x20, +attack2 0x800. OJO: 0x100114d0, que llama
+el +attack2 con el "menu" abierto, NO es confirmar (crea un objeto
+delante del jugador); un primer intento lo uso por error.
+
+ARREGLO (parchear.ps1, sobre hl.dll): los tres casos de arma del switch
+de impulses (0x1000ff13, 76 bytes: N, siguiente = impulse 10, anterior =
+impulse 11) se reescriben con un final comun que hace la confirmacion:
+weapon = byte 0 y call 0x10010990. La tabla del switch (0x100102f4)
+lleva las entradas nuevas de los casos 1 y 2 (direcciones absolutas con
+reubicacion: se cambia el valor para la base preferida).
+PROBADO: impulse 1 -> weapon 1, v_crowbar; 2 -> 2, v_glock; 3 -> 4,
+v_mp5 (capturas con cada arma); guardar y cargar la conservan.
+
+AVISO: PANDA DOME SE COME parchear.ps1. Al anadir estos parches (listas de
+bytes de codigo maquina en un .ps1 que escribe ejecutables), el
+antivirus Panda Dome retira src-carga\parchear.ps1 a los pocos segundos
+de escribirlo (PowerShell daba "Error al crear la canalizacion" y luego
+el fichero ya no estaba; Defender esta apagado y no registra nada).
+El hl.dll de este apartado se genero con Node aplicando la misma lista
+de parches con las mismas comprobaciones de bytes. Para recuperar el
+script: restaurarlo desde la cuarentena de Panda y excluir src-carga, o
+volver a escribirlo.
+
+
+31. OTRO CRASH EN EL DIBUJADO DE DECALS: POLIGONOS DE MAS DE 16 VERTICES (25-09-2026)
+-------------------------------------------------------------------------------------
+SINTOMA (jugando, c1a1a, sin cargar nada): cierre del juego. Evento de
+Windows: c0000005 en enginegl-carga.exe+0x38882 (0x438882), junto al
+del apartado 14. Antes, en consola: "Decals must hit mod_brush!".
+
+VOLCADO: %LOCALAPPDATA%\CrashDumps\enginegl-carga.exe.41224.dmp (WER los
+guarda ahi). Leido a mano con Node (formato minidump: stream 6 =
+excepcion + CONTEXT x86 de 716 bytes, 5/9 = memoria). eax = 0x3f120000,
+lectura en 0x3f12002c. Las variables locales del bucle estaban
+machacadas con floats: [ebp-0x20] (cursor de la lista) = -60,0,
+[ebp-0x1c] (contador) = 7,5, [ebp-0x18] (superficie) = 0,57.
+
+CAUSA (bug del motor de 1997): R_DrawDecals (0x438778) copia los
+vertices del poligono de la superficie a un bufer de pila en
+ebp-0x258 con sitio para 20 vertices (0x230 bytes, 28 por vertice) SIN
+mirar cuantos hay, y luego lo recorta contra los 4 bordes de la decal
+(0x4386b1, alternando con otro bufer igual en ebp-0x488; cada recorte
+de un poligono convexo anade como mucho un vertice). Con mas de 16
+vertices el bufer se sale por encima y pisa las variables del bucle.
+Caras con mas de 16 vertices en los mapas de la alpha: 116 de 137.203
+(maximo 28; c1a1a tiene 16).
+
+ARREGLO (estatico en enginegl-carga.exe; APLICADO CON NODE porque
+parchear.ps1 esta en la cuarentena de Panda -- hay que anadirlo al
+script cuando se recupere):
+  0x4388eb: 7e 3f 8d 85 a8 fd ff ff (jle 0x43892c / lea eax,[ebp-0x258])
+         -> e9 80 dc 01 00 90 90 90 (jmp 0x456570)
+  0x456570 (hueco de .text, tras el de svc_setangle), 27 bytes:
+    0f 8e b6 23 fe ff   jle 0x43892c          (lo de antes)
+    83 78 08 10         cmp dword [eax+8],16  (numverts del poligono)
+    0f 8f 57 24 fe ff   jg 0x4389d7           (no dibujar esta decal:
+                                               restaura los parametros
+                                               de textura y sigue)
+    8d 85 a8 fd ff ff   lea eax,[ebp-0x258]   (lo de antes)
+    e9 68 23 fe ff      jmp 0x4388f3
+  El salto va despues de que la FPU quede vacia (0x4388e8), para no
+  dejar valores en su pila al saltarse la decal.
+EFECTO: en esas 116 caras no se ven agujeros de bala ni sangre; el
+resto igual.
+PROBADO: disparando en c1a1 las decals se dibujan y no peta. El caso
+exacto (disparar a una cara de mas de 16 vertices) no se ha forzado.
+
+
+32. LOS AGUJEROS DE BALA PARPADEAN (25-09-2026)
+-----------------------------------------------
+SINTOMA (jugando): las decals parpadean entre negro y gris sin moverse.
+
+MEDIDO: 4 capturas en fotogramas seguidos mirando un agujero en una
+pared oblicua: con gl_ztrick 1 (el valor de fabrica, cvar en 0x45a928,
+no se archiva) el agujero sale en los fotogramas 1 y 3 y no en 2 y 4;
+con gl_ztrick 0 no sale en ninguno.
+
+CAUSA (motor de 1997): gl_ztrick alterna cada fotograma el rango de
+profundidad (gldepthmin 0xd3b474 = 0 o 1, R_Clear hacia 0x42222b) para
+no borrar el z-buffer. R_DrawDecals (0x4387c4) llama a
+glPolygonOffset(factor, units) con units = +4 en los fotogramas
+invertidos y -4 en los normales (o siempre -4 sin ztrick), pero con
+factor = +1 SIEMPRE. En los normales el factor empuja la decal hacia
+dentro de la pared; en oblicuo gana el factor y la decal queda detras.
+
+ARREGLO (estatico en enginegl-carga.exe; APLICADO CON NODE, falta
+pasarlo a parchear.ps1): el factor lleva el signo de las unidades.
+  0x4387d4: 74 19 -> 74 1e            (je  -> 0x4387f4)
+  0x4387e6: 72 07 -> 72 0c            (jb  -> 0x4387f4)
+  0x4387e8: 68 00 00 80 40 eb 05 68 00 00 80 c0 68 00 00 80 3f
+         -> 68 00 00 80 40            push 4.0   (invertido)
+            68 00 00 80 3f            push 1.0
+            eb 05                     jmp 0x4387f9 (la llamada)
+            e9 97 dd 01 00            jmp 0x456590
+  0x456590 (hueco de .text, tras el del apartado 31), 15 bytes:
+            68 00 00 80 c0            push -4.0  (normal)
+            68 00 00 80 bf            push -1.0
+            e9 5a 22 fe ff            jmp 0x4387f9
+PROBADO: mismas 4+4 capturas: el agujero sale en las 8, con gl_ztrick
+1 y con 0.
+
+
+33. UN SOLO .EXE Y CARPETA LIMPIA (25-09-2026)
+----------------------------------------------
+- "Half-Life Alpha.exe" = el motor parcheado (lo que era
+  enginegl-carga.exe, renombrado). Con doble clic arranca en el menu
+  principal, sin .bat: hlsave.dll, que se carga antes del CRT, cambia la
+  entrada de GetCommandLineA en la IAT (0xd3f4b0) por una funcion que
+  devuelve la linea original mas lo que falte de: -heapsize 524288
+  -condebug -width 800 -bpp 32 +maxplayers 1 +togglemenu +sizedown (el
+  +togglemenu solo si no se pide ya +map/+load/+togglemenu). Queda
+  anotada en hlsave.log ("linea de ordenes: ...").
+  OJO al probar con "+exec x.cfg": exec mete el cfg delante del resto de
+  la linea, asi que se ejecuta ANTES que el +togglemenu anadido.
+- "New Game" del menu manda "maxplayers 1" + "map start" y la alpha no
+  trae start.bsp: mi_map lo cambia por "map c1a1". Probado: arranca
+  c1a1 y se puede guardar.
+- Video: OpenGL nativo (sin Opengl32.dll en la carpeta). Las variables
+  SST_*/FX_GLIDE de los .bat eran solo para Glide/nGlide.
+- Apartado a _retirado\ (no borrado): los tres .bat, config.exe, los DLL
+  de 3Dfx/Glide (3DfxSpl*.dll, glide*.dll, Opengl32-3dfx.dll),
+  enginegl-carga.exe, hlsave.log.viejo y en _retirado\valve\ los cfg y
+  .sav de pruebas (cap_a, hud_niveles, zcargar, zguardar, zfria, angulos,
+  prueba, atascado, quick).
+- originales\: enginegl.exe y hl-original.dll, de los que se regenera
+  todo. parchear.ps1 (en la cuarentena de Panda) los buscaba en la raiz y
+  escribia enginegl-carga.exe: al recuperarlo hay que cambiar esas rutas
+  y que escriba "Half-Life Alpha.exe", ademas de anadir los parches de
+  los apartados 31 y 32.
+
+
+34. LA VISTA SE INVIERTE AL CAMBIAR DE NIVEL (25-09-2026)
+---------------------------------------------------------
+SINTOMA (jugando): en una transicion, si miras abajo apareces mirando
+arriba y viceversa.
+
+CAUSA (hl.dll): el Spawn del jugador con estructura de paso repone
+pev->angles desde +0x60 (los angulos del MODELO que guardo el trigger:
+cabeceo = -vista/3, como en Quake) y v_angle desde +0x6c con el cabeceo
+cambiado de signo; luego fixangle = 1, y el svc_setangle manda ANGLES.
+El cliente recibia -vista/3. Mismo fallo que el del apartado 10 al
+cargar. Medido (c1a2c -> c1a2b, mirando 60 grados abajo): "entrada en
+c1a2b ... v_angle=(-60 0) angles=(-20 0)".
+
+ARREGLO (en valve\dlls\hl.dll, APLICADO CON NODE; falta en el script):
+  0x1000b6c2: 8d 4f 60 -> 8d 4f 6c   (angles salen de la vista guardada)
+  0x1000b6e2: 35 00 00 00 80 -> 90 x5 (sin cambiar el signo del cabeceo;
+                                       es el xor que puse en el bloque
+                                       del apartado 27, que copiaba el
+                                       fchs original)
+Sin reubicaciones en el tramo. El balanceo (+0x74) lo deja a 0 el
+trigger.
+PROBADO: misma prueba -> "v_angle=(60 0) angles=(60 0)", y la velocidad
+se sigue conservando.
+
+DE PASO, DOS COSAS DE LAS PRUEBAS:
+- hlsave.dll ponia sus parametros por defecto DETRAS de los del usuario;
+  con "+map x" en la linea, "+maxplayers 1" llegaba tarde y el mapa
+  arrancaba en multijugador (sin cambios de nivel). Ahora van delante
+  (-heapsize ... +maxplayers 1, luego los del usuario, luego +togglemenu
+  y +sizedown).
+- pfnChangeLevel ENCOLA "changelevel" al final del bufer de ordenes: en
+  una prueba con cfg, el cambio no ocurre hasta que se acaban los wait
+  que queden. El cfg tiene que terminar justo al pisar la salida.
+- El log de entrada en un mapa lleva ahora v_angle y angles.
+
+
+35. GRANADA ENTRE VARIOS PERROS: "Illegible server message" (25-09-2026)
+-------------------------------------------------------------------------
+SINTOMA (jugando, c1a1b): granada a 3-4 perros -> en consola
+"SZ_GetSpace: overflow" + "Host_Error: CL_ParseServerMessage:
+Illegible server message" y la partida se corta. hlsave.log: "se lleno
+sv.datagram (MSG_BROADCAST) ... maxsize=1024 cursize=1023".
+
+CAUSA: EL ARREGLO DEL APARTADO 19 ERA MALO. Vaciar el bufer al llenarse
+lo hace A MITAD DE UN MENSAJE (hl.dll escribe byte a byte en el destino):
+el resto del mensaje queda al principio del bufer vacio y el cliente
+recibe basura. Se cambio un Engine Error por un Host_Error.
+
+ARREGLO (hlsave.dll, ampliar_bufers_servidor, tras cada "map" y en cada
+"begin", porque SV_SpawnServer los reapunta a sus bufers fijos en
+0x432662..): sv.datagram pasa a un bufer propio de 16 KB y
+sv.reliable_datagram a uno de 4 KB (se copia lo que ya tuvieran).
+Al mandar (0x431e2c) el motor copia sv.datagram al mensaje del cliente
+SOLO si cabe entero, y si no lo descarta completo: se pierden los
+efectos de ese fotograma pero no se corrompe nada. El reliable va al
+mensaje fiable de cada cliente, de 8000 bytes. sizebuf_t: +8 data, +0xc
+maxsize, +0x10 cursize. Las comprobaciones propias del motor con 0x3f0
+(1008, p. ej. 0x430ccc) siguen igual. El vaciado del apartado 19 se
+queda solo para el caso extremo de llenar 16 KB en un fotograma.
+PROBADO: cargar s11 (c1a3) con una manada de perros, granadas y
+disparos hasta morir: "sv.datagram ampliado a 16384 bytes", sin
+desbordes ni errores. No se ha medido si algun fotograma paso de 1 KB:
+falta confirmarlo jugando (repetir la granada).
+NOTA DE PRUEBAS: un cfg de mas de ~8 KB no se ejecuta (y con el .exe
+nuevo solo se ve el menu); para cargar, "+load s11" en la linea de
+ordenes, que ademas evita el menu.
+
+
+36. RESOLUCION DEL ESCRITORIO (25-09-2026)
+------------------------------------------
+El motor (codigo de GLQuake) acepta -width/-height con el OpenGL
+nativo. hlsave.dll pone ahora por defecto la resolucion REAL de la
+pantalla (EnumDisplaySettings ENUM_CURRENT_SETTINGS; GetSystemMetrics
+daria la escalada si Windows escala por encima del 100 %), y 800x600 si
+fallara. Si se pasan -width o -height a mano, mandan esos.
+PROBADO: doble clic -> "linea de ordenes: ... -width 1920 -height 1080"
+y el menu a pantalla completa; "+map c1a1" a 1920x1080 se juega bien,
+cruceta centrada.
+LIMITES: el 2D (HUD, menus, consola) es una pantalla virtual de 320x200
+estirada a toda la pantalla, asi que en 16:9 se ve ancho. Y con "fov 90"
+(horizontal) en 16:9 se ve menos en vertical que en 4:3 (58,7 grados
+frente a 73,7); para la misma vista vertical que en 4:3 haria falta
+"fov 106".
+
+
+37. SOMBRAS: SIN LA DEL ARMA NI LA DE LA GRANADA (25-09-2026)
+-------------------------------------------------------------
+PETICION: con r_shadows 1 (autoexec.cfg y DEFAULT.CFG) dejar la sombra
+de los NPC pero quitar la que sale junto al arma y la de la granada en
+vuelo.
+
+DONDE: r_shadows (cvar_t en 0x4614c8, valor en 0x4614d8) se mira en
+0x4165e4 (R_StudioDrawModel, 0x4163f3, modelos de estudio de HL) y en
+0x42177c (modelos alias de Quake). En el primero el motor solo se salta
+la sombra con rendermode 5 (entidad +0x98). cl.viewent = 0x849cb8 (el
+arma en primera persona; R_DrawViewModel la pone en currententity
+0xc677d4 en 0x421989); el model_t va en la entidad +0xa8, con el nombre
+al principio.
+
+ARREGLO (hlsave.dll, enganchar_sombras, en tiempo de ejecucion; no
+depende de parchear.ps1): los 13 bytes de 0x4165fd (cmp dword
+[esi+98h],5 / je 0x416706, comprobados antes de tocar) pasan a un jmp a
+sombra_puente, que llama a sombra_permitida(entidad) y vuelve a
+0x41660a (dibujar) o 0x416706 (saltarsela). Sin sombra: rendermode 5
+(lo de antes), cl.viewent y los modelos con "grenade" en el nombre.
+Guarda ecx/edx; eax se pisa enseguida en los dos destinos.
+
+PROBADO: el log dice "sombra: sin sombra el arma en primera persona
+(models/v_glock.mdl)" y "sombra: sin sombra models/grenade.mdl" (se
+apunta solo la primera vez), y la sombra del cientifico sigue en las
+capturas. Las capturas antes/despues NO demostraron nada: en las vistas
+probadas ninguna de las dos sombras caia en cuadro ni sin el arreglo.
+
+AMPLIACION (mismo dia): el usuario prefiere sin sombras tambien en los
+NPC. No hay otra sombra "basica": la unica del motor es esta de
+r_shadows. valve\autoexec.cfg pasa a "r_shadows 0" (autoexec se ejecuta
+despues de DEFAULT.CFG, que la trae a 1). El enganche de 0x4165fd se
+queda: si alguien vuelve a poner r_shadows 1, el arma y la granada
+seguiran sin sombra. PROBADO: misma vista que antes, el cientifico ya
+no tiene sombra.
+
+
+38. PUERTAS (Y DEMAS ENTIDADES) INVISIBLES HASTA ACERCARTE (25-09-2026)
+------------------------------------------------------------------------
+SINTOMA (jugando, guardado rapido en c1a1a): la puerta de enfrente no se
+ve; al acercarte aparece. Es el LIMITE que se aviso en el apartado 24.
+
+COMPROBADO en el .bsp: ojo del jugador (-455 1691 264) en la hoja 1413;
+la puerta (edict 91, func_door *81, a 311 u delante) cae en la hoja
+1787, que el PVS del mapa da como NO visible, y tampoco al reves (no se
+arregla haciendolo simetrico). r_novis solo afecta al dibujado del
+mundo; las entidades las filtra el SERVIDOR con el PVS.
+
+ARREGLO (hlsave.dll, entidades_sin_pvs, en cada "map" y cada "begin"):
+con UN jugador (svs.maxclients == 1) se mandan todas las entidades:
+  0x43148b: 0f 84 fc 04 00 00 -> 90 x6  (SV_WriteEntitiesToClient
+            0x431394 ya no descarta la entidad si ninguna de sus hojas
+            sale en el PVS)
+  y el mensaje por fotograma de SV_SendClientDatagram (0x431dbf), un
+  bufer de pila de 1 KB, pasa a 4 KB:
+  0x431dc2: sub esp,418h      -> sub esp,1018h
+  0x431dc9: lea eax,[ebp-418h] -> lea eax,[ebp-1018h]
+  0x431dd8: mov [ebp-8],400h  -> mov [ebp-8],1000h (maxsize)
+  (el cliente local va por loopback, que en Quake admite 8 KB). En
+  multijugador se vuelven a poner los bytes originales: por red un
+  datagrama de mas de 1 KB no vale. Antes de tocar se comprueba que en
+  cada sitio estan los bytes originales o los nuevos.
+PROBADO: cargando s11, con el arreglo la puerta se ve y sin el (DLL
+temporal) no; sin "packet overflow". Con "+maxplayers 4": "entidades:
+solo las del PVS (multijugador, codigo original)".
+
+
+39. LOS MAPAS CONSERVAN SU ESTADO ENTRE TRANSICIONES (25-09-2026)
+-----------------------------------------------------------------
+ANTES: cada changelevel arrancaba el mapa de cero; al volver, botones,
+puertas y enemigos estaban como al principio (la alpha no tiene la
+persistencia de niveles del HL final).
+
+AHORA (hlsave.dll):
+- mi_changelevel / mi_changelevel2: antes de cambiar, guardar_nivel_actual
+  escribe el bloque CLDX del mapa que se deja en valve\SAVE\<mapa>.niv
+  (fichero vacio + anexar_bloques) y marca nivel_pendiente.
+- mi_begin tras un changelevel: si hay SAVE\<mapa>.niv, lo carga y llama
+  a mi_restaurar con conservar_jugador = 1: el edict 1 no se libera ni se
+  sobrescribe (su entrada del fichero se lee y se descarta con
+  saltar_entrada), y a las entidades que le apunten se les da su bloque
+  privado vivo (privs[1]). El reloj del servidor pasa al del mapa
+  guardado y los tiempos absolutos del jugador (nextthink, air_finished,
+  pain_finished, radsuit_finished, teleport_time, dmgtime) se desplazan
+  lo mismo. No se fuerza la vista. La salida por la que se fue, que el
+  trigger apago al pisarla, la rearma rearmar_salidas.
+- mi_map sin carga pendiente (partida nueva, "New Game", map a mano):
+  borra SAVE\*.niv. Los changelevel no pasan por "map".
+- mi_save: copia SAVE\*.niv a SAVE\<partida>\. mi_load: vacia SAVE\ y
+  copia ahi los de SAVE\<partida>\ (si no hay, los demas mapas empiezan
+  de cero).
+- De paso, mi_save solo anade el bloque si el motor acaba de escribir el
+  .sav (fecha de modificacion): si se negaba a guardar ("Can't savegame
+  with a dead player") y ya habia un .sav con ese nombre, se le anadia un
+  bloque a una partida vieja.
+- Gancho de pruebas: en la entrada N a un mapa de la sesion, si existe
+  valve\zprueba_N.cfg se ejecuta ("prueba: exec ..." en el log). Sirve
+  para encadenar pruebas a traves de cambios de nivel (un cfg normal no
+  puede: el changelevel se encola detras de sus wait).
+
+PROBADO:
+- c1a2c: romper el func_glass a tiros, ir a c1a2b (nuevo: "empieza de
+  cero") y volver: "c1a2c ya se habia visitado, se repone su estado",
+  0 descuadres, salida rearmada; el cristal sigue roto (solid 0, health
+  -2) y los soldados con la vida que tenian; el jugador llega con la vida
+  de c1a2b (90), no la del guardado de c1a2c (100).
+- load de esa partida -> SAVE\ recupera sus 2 estados; ir a c1a2b ->
+  "ya se habia visitado", 148 edicts, 0 descuadres.
+- "map c1a1" (partida nueva) -> "borrados 2 estados".
+
+
+40. CRASH TRAS VARIAS IDAS Y VUELTAS ENTRE MAPAS (25-09-2026)
+-------------------------------------------------------------
+SINTOMA (jugando, c1a3 <-> c1a3a, matando enemigos): cierre del juego
+tras la segunda vuelta. Log: al volver a c1a3 "6 descuadres", al volver
+a c1a3a "sin copia=2".
+
+VOLCADO (CrashDumps\Half-Life Alpha.exe.48724.dmp): c0000005 en hl.dll
++0x18d7d (0x10018d7d), lectura de 0x7c con esi = 0: una funcion de
+entidad lee pev->pSystemGlobals (entvars +0x20c) y de ahi la hora
+(+0x7c), y el puntero era nulo.
+
+CAUSA (nuestra): los unicos punteros de clase VIVO de los guardados son
+pSystemGlobals (entvars +0x20c) y su copia en el bloque privado (+0x8;
+hl.dll la rellena desde +0x20c en 0x10005f5f): el mismo valor en todas
+las entidades. Al restaurar se copiaban del edict que ocupa esa misma
+posicion en el mapa recien arrancado; pero al volver a un mapa en el que
+se ha jugado hay entidades creadas jugando, y en esas posiciones el
+edict nuevo esta libre: el puntero quedaba nulo (o a 0 "sin copia").
+
+ARREGLO (hlsave.dll, mi_restaurar):
+- Si falta, pSystemGlobals se toma del mundo (edict 0), que siempre esta.
+  El log lo cuenta: "globales del mundo=N".
+- Los edicts que pasan de ocupados (mapa recien arrancado) a libres
+  (estado guardado) se desenlazan del mundo (SV_UnlinkEdict, 0x429fe9,
+  al que llama SV_LinkEdict al empezar) y se les ponen a 0 modelindex,
+  model, solid, takedamage, nextthink, effects y movetype, como ED_Free;
+  antes solo se marcaban libres y seguian enlazados como fantasmas.
+- Al terminar, todas las entidades restauradas se vuelven a enlazar con
+  su posicion guardada (SV_LinkEdict), como el loadgame de Quake: el
+  enlace de area conservado era el del mapa recien arrancado. Tambien
+  vale para cargar partida.
+PROBADO (con los zprueba_N.cfg): c1a2c -> c1a2b -> c1a2c -> c1a2b ->
+c1a2c con granadas en los dos mapas: sin crash; en la primera vuelta
+"globales del mundo=2" (lo que antes quedaba nulo), descuadres 1-2.
+
+
+41. GUARDADO RAPIDO: DE 1,3 S A UNOS 10 MS (25-09-2026)
+-------------------------------------------------------
+MEDIDO (c1a3a, 258 edicts): guardado del motor 5 ms; nuestro bloque
+1.282-1.451 ms. Con contadores dentro de anexar_bloques: 1.326 ms en
+buscar_relocs, y dentro de ella solo 510 llamadas a VirtualQuery (y 0
+busquedas en bloques privados): ~2,5 ms POR LLAMADA en este sistema
+(algo la intercepta: antivirus / capa de 32 bits). Las 510 son casi
+siempre la misma direccion, pSystemGlobals, una por entidad.
+
+ARREGLO (hlsave.dll):
+- direccion_viva recuerda la ultima region devuelta por VirtualQuery
+  (base, tamano, si esta comprometida) y contesta sin llamar al sistema
+  para las direcciones que caen dentro. Si la region cambiara entre
+  guardados no pasa nada grave: un puntero marcado VIVO se sustituye al
+  cargar por el de la sesion.
+- De paso, el bloque se monta entero en memoria y se escribe con un solo
+  WriteFile (antes, uno por campo; la cuenta de cadenas se rellenaba
+  retrocediendo en el fichero). No era lo que tardaba, pero sobra.
+RESULTADO: bloque propio 1-4 ms; mismo numero de punteros por clase
+(edict 515, hl.dll 400, vivo 510) y el guardado nuevo carga con 253
+bloques comparados, 0 distintos. Tambien acelera cada cambio de nivel,
+que guarda el mapa que se deja con el mismo codigo (apartado 39).
+El log lleva "tiempos del guardado: motor N ms, bloque propio N ms,
+estados de mapas N ms".
+
+
+42. EL CD ORIGINAL Y EL PROYECTO EN MEMORIA (winmm.dll) (25-09-2026)
+--------------------------------------------------------------------
+- Todo se aplica ahora desde una winmm.dll propia (proyecto
+  hl-alpha-052-fixes; ver README.md), sin tocar ningun fichero de Valve.
+- La copia de la alpha del CD ("Half-Life alpha cd") trae el enginegl.exe
+  ORIGINAL: el que usabamos (el de lan Party) solo difiere en 4 bytes de
+  la cabecera PE: Characteristics 0x12a en vez de 0x10a (bit 0x20,
+  IMAGE_FILE_LARGE_ADDRESS_AWARE, puesto por alguien despues) y la suma
+  de comprobacion recalculada (0 en el del CD). El codigo es identico, asi
+  que la DLL acepta los dos hashes. hl.dll y progs.dat son los mismos.
+- El CD arranca con "enginegl +map techdemo +exec gaben.cfg -width 640":
+  techdemo es una sala de demostracion tecnica ("COLORED LIGHTING"...),
+  y gaben.cfg, binds de desarrollo (noclip, god, host_speeds...).
+  Trae ademas engine.exe (render por software) y en bin\ las
+  herramientas de mapas de 1997 (qcsg, qbsp2, vis, qrad, qcc y WC.EXE,
+  Worldcraft); los mapas vienen solo como .bsp.
+- PROBADO en una copia ("Half-Life alpha cd (prueba)", con winmm.dll y el
+  Opengl32.dll de 3Dfx renombrado): arranca techdemo como el .bat,
+  "enginegl.exe original (el del CD)", 34 + 19 parches; guardar y cargar
+  en techdemo: 82 edicts, 0 distintos, 0 descuadres.

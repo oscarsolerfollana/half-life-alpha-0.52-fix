@@ -1,0 +1,6 @@
+build/
+*.sav
+*.niv
+*.log
+*.tga
+*.dmp
