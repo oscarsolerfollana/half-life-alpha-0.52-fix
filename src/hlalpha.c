@@ -1,33 +1,34 @@
 /*
- * hlalpha.c -- los arreglos de la Half-Life Alpha 0.52 que se aplican en
- * tiempo de ejecucion (antes hlsave.dll). Va dentro de winmm.dll: ver
- * cargador.c, que comprueba los binarios y aplica los parches estaticos.
+ * hlalpha.c -- the Half-Life Alpha 0.52 fixes that are applied at run
+ * time (formerly hlsave.dll). It lives inside winmm.dll: see loader.c,
+ * which checks the binaries and applies the static patches.
  */
 /*
- * hlsave.dll - guardado y cargado completos para Half-Life Alpha 0.52
+ * hlsave.dll - complete saving and loading for Half-Life Alpha 0.52
  *
- * Por que existe: el motor de la alpha solo guarda las entvars de cada
- * entidad, en texto. El estado privado C++ (el bloque que hl.dll reserva
- * por entidad) no se escribe nunca, porque el Save de la DLL es una traza
- * vacia y su Restore es un "ret" pelado. Y la carga ni siquiera existe:
- * quedo el parser de texto de Quake, que no entiende el formato nuevo.
+ * Why it exists: the alpha engine only saves each entity's entvars, as
+ * text. The private C++ state (the block hl.dll allocates per entity) is
+ * never written, because the DLL's Save is an empty stub and its Restore
+ * is a bare "ret". And loading does not even exist: what is left is
+ * Quake's text parser, which does not understand the new format.
  *
- * Aqui se hace lo que falta:
- *   - se arregla el desbordamiento del bufer de guardado (bug de 1997)
- *   - se anota el tamaño del bloque privado de cada entidad
- *   - "save" añade al fichero un bloque propio con TODO el estado
- *   - "load" se reescribe entero
+ * What is missing is done here:
+ *   - the save buffer overflow is fixed (a 1997 bug)
+ *   - the size of each entity's private block is recorded
+ *   - "save" appends our own block with ALL the state to the file
+ *   - "load" is rewritten from scratch
  *
- * Se inyecta redirigiendo el punto de entrada de enginegl.exe.
+ * (Originally it was injected by redirecting the entry point of
+ * enginegl.exe.)
  */
 
 #include <windows.h>
 #include <string.h>
 #include <stdio.h>
-#include "motor.h"
+#include "engine.h"
 
 /* ================================================================== */
-/*  registro a fichero                                                */
+/*  logging to a file                                                 */
 /* ================================================================== */
 
 void reg(const char *fmt, ...)
@@ -51,7 +52,7 @@ void reg(const char *fmt, ...)
 }
 
 /* ================================================================== */
-/*  parcheo de memoria                                                */
+/*  memory patching                                                   */
 /* ================================================================== */
 
 static int escribir_dword(unsigned int direccion, unsigned int valor)
@@ -65,21 +66,20 @@ static int escribir_dword(unsigned int direccion, unsigned int valor)
 }
 
 /* ================================================================== */
-/*  base de los modulos                                               */
+/*  module bases                                                      */
 /* ================================================================== */
 /*
- * hl.dll NO carga en 0x10000000. Trae tabla de reubicaciones y Windows
- * la mueve a donde le parece: en tres arranques seguidos salio en
- * 0x1f160000, 0x3daf0000 y 0x3d5e0000. Eso importa mucho aqui, porque el
- * offset 0 de cada bloque privado es el puntero a la vtable C++ de la
- * clase, o sea una direccion DENTRO de hl.dll. Guardada en crudo solo
- * vale mientras el modulo siga en el mismo sitio, y no sigue: al volver a
- * abrir el juego la partida cargada salta a punteros muertos. Por eso van
- * como offset dentro del modulo.
+ * hl.dll does NOT load at 0x10000000. It has a relocation table and
+ * Windows moves it wherever it likes: in three consecutive launches it
+ * ended up at 0x1f160000, 0x3daf0000 and 0x3d5e0000. That matters a lot
+ * here, because offset 0 of every private block is the pointer to the
+ * class's C++ vtable, i.e. an address INSIDE hl.dll. Saved raw it is only
+ * valid while the module stays in the same place, and it does not: when
+ * the game is reopened, the loaded game jumps to dead pointers. That is
+ * why they are stored as offsets inside the module.
  *
- * El .exe si tiene base fija (0x400000, sin reubicaciones), asi que los
- * punteros a sus datos estaticos -- entre ellos las cadenas -- se pueden
- * dejar tal cual.
+ * The .exe does have a fixed base (0x400000, no relocations), so pointers
+ * to its static data -- strings among them -- can be left as they are.
  */
 static unsigned int base_dll, tam_dll, base_exe, tam_exe;
 
@@ -103,7 +103,7 @@ static void localizar_modulos(void)
 }
 
 /* ================================================================== */
-/*  tamaño de los bloques privados                                    */
+/*  size of the private blocks                                        */
 /* ================================================================== */
 
 static int tam_privado[MAX_EDICTS_PROPIO];
@@ -141,7 +141,7 @@ static void __cdecl mi_free_privado(void *ed)
 }
 
 /* ================================================================== */
-/*  utilidades                                                        */
+/*  utilities                                                         */
 /* ================================================================== */
 
 static void *edict_n(int i)       { return SV_EDICTS + (size_t)i * EDICT_SIZE; }
@@ -162,8 +162,8 @@ static ddef_t *fielddef_n(int i)
     return base ? base + i : NULL;
 }
 
-/* Deja constancia del estado del jugador, para comprobar que lo que se
-   restaura es lo que se guardo. wvsprintf no sabe de decimales, van enteros. */
+/* Logs the player's state, to check that what is restored is what was
+   saved. wvsprintf knows nothing about decimals, so they go as integers. */
 static void registrar_jugador(const char *cuando)
 {
     ddef_t *dh, *dorg, *dva;
@@ -180,14 +180,14 @@ static void registrar_jugador(const char *cuando)
     if (dva)  vang = (float *)((char *)e + ED_VARS_OFS + dva->ofs * 4);
 
     {
-        /* suma de control del bloque privado: si cuadra antes y despues,
-           el estado C++ ha viajado entero */
+        /* checksum of the private block: if it matches before and after,
+           the C++ state has travelled intact */
         unsigned char *p = (unsigned char *)privado_de(e);
         int tam = tam_privado[1], k;
         unsigned int suma = 0;
         for (k = 0; p && k < tam; k++) suma = suma * 31u + p[k];
 
-        reg("%s: t=%dms vida=%d org=(%d %d %d) vang=(%d %d %d) priv=%d suma=0x%08x",
+        reg("%s: t=%dms health=%d org=(%d %d %d) vang=(%d %d %d) priv=%d sum=0x%08x",
             cuando, (int)(SV_TIME * 1000.0), (int)vida,
             org  ? (int)org[0]  : 0, org  ? (int)org[1]  : 0, org  ? (int)org[2]  : 0,
             vang ? (int)vang[0] : 0, vang ? (int)vang[1] : 0, vang ? (int)vang[2] : 0,
@@ -196,12 +196,12 @@ static void registrar_jugador(const char *cuando)
 }
 
 /*
- * Los angulos de vista se restauran en el servidor (van en las entvars),
- * pero el CLIENTE lleva su propia copia y no se entera. En el Quake del
- * que sale este motor, la forma de obligarle a mirar donde toca es poner
- * fixangle=1 en la entidad del jugador: entonces el servidor le manda un
- * svc_setangle con v.angles y el cliente salta a esa direccion.
- * Sin esto el jugador carga mirando siempre al mismo sitio.
+ * The view angles are restored on the server (they are in the entvars),
+ * but the CLIENT keeps its own copy and never finds out. In the Quake this
+ * engine comes from, the way to force it to look in the right direction
+ * is to set fixangle=1 on the player entity: the server then sends it an
+ * svc_setangle with v.angles and the client snaps to that direction.
+ * Without this the player always loads looking in the same direction.
  */
 static void forzar_vista_jugador(void)
 {
@@ -217,7 +217,7 @@ static void forzar_vista_jugador(void)
     dang = (ddef_t *)ED_FindField("angles");
     dfix = (ddef_t *)ED_FindField("fixangle");
     if (!dva || !dang || !dfix) {
-        reg("vista: faltan campos (v_angle=%d angles=%d fixangle=%d)",
+        reg("view: missing fields (v_angle=%d angles=%d fixangle=%d)",
             dva != 0, dang != 0, dfix != 0);
         return;
     }
@@ -226,24 +226,25 @@ static void forzar_vista_jugador(void)
     ang = (float *)((char *)e + ED_VARS_OFS + dang->ofs * 4);
 
     /*
-     * svc_setangle manda v.angles, no v_angle, asi que hay que igualarlos.
+     * svc_setangle sends v.angles, not v_angle, so they have to be made
+     * equal.
      *
-     * Pero el BALANCEO (indice 2) va a cero a proposito. Es el efecto de
-     * inclinacion al andar de lado, y el motor lo recalcula solo en cada
-     * fotograma a partir de la velocidad: no es un angulo de vista de
-     * verdad, no se debe guardar ni reponer. Si se le fuerza al cliente,
-     * se le queda pegado en cl.viewangles y nadie lo vuelve a poner a
-     * cero, asi que cargas torcido y te quedas torcido para siempre.
-     * OJO: con esto no basta, SV_ClientThink lo recalcula de la velocidad
-     * antes de mandarlo; lo que lo arregla es que el cliente descarte el
-     * balanceo del svc_setangle (parchear.ps1, NOTAS apartado 21).
+     * But the ROLL (index 2) is set to zero on purpose. It is the tilt
+     * effect when strafing, and the engine recomputes it by itself every
+     * frame from the velocity: it is not a real view angle, it must not be
+     * saved or restored. If it is forced on the client, it sticks in
+     * cl.viewangles and nobody ever sets it back to zero, so you load
+     * tilted and stay tilted forever.
+     * NOTE: this is not enough, SV_ClientThink recomputes it from the
+     * velocity before sending it; what fixes it is making the client
+     * discard the roll of svc_setangle (parchear.ps1, NOTES section 21).
      */
     ang[0] = va[0];
     ang[1] = va[1];
     ang[2] = 0.0f;
     *(float *)((char *)e + ED_VARS_OFS + dfix->ofs * 4) = 1.0f;
 
-    reg("vista: v_angle=(%d %d %d), balanceo %d descartado, fixangle puesto",
+    reg("view: v_angle=(%d %d %d), roll %d discarded, fixangle set",
         (int)va[0], (int)va[1], (int)va[2], (int)va[2]);
 }
 
@@ -254,18 +255,19 @@ static char *cadena_motor(unsigned int ofs)
 }
 
 /* ================================================================== */
-/*  formato del bloque propio                                         */
+/*  format of our own block                                           */
 /* ================================================================== */
 
 #define MARCA_EXTRA   0x58444C43u   /* CLDX */
 #define VERSION_EXTRA 3
 
-#define RELOC_EDICT   1   /* puntero a un edict                           */
-#define RELOC_PRIVADO 2   /* puntero a otro bloque privado                */
-#define RELOC_DLL     3   /* puntero dentro de hl.dll (vtables y metodos) */
-#define RELOC_VIVO    4   /* puntero a algo del motor que no sabemos
-                             traducir: al cargar se deja el que tenga el
-                             proceso recien arrancado, no el guardado     */
+#define RELOC_EDICT   1   /* pointer to an edict                          */
+#define RELOC_PRIVADO 2   /* pointer to another private block             */
+#define RELOC_DLL     3   /* pointer inside hl.dll (vtables and methods)  */
+#define RELOC_VIVO    4   /* pointer to something in the engine that we
+                             cannot translate: on load the value from the
+                             freshly started process is kept, not the
+                             saved one                                    */
 
 typedef struct {
     unsigned int desplazamiento;
@@ -276,12 +278,12 @@ typedef struct {
 
 #define MAX_RELOCS 8192
 
-/* ---------------- escritura ---------------- */
+/* ---------------- writing ---------------- */
 
 /*
- * Todo el bloque se monta en memoria y se escribe de una vez al final. Con
- * un WriteFile por campo (miles por guardado) el bloque tardaba 1,3-1,5 s
- * en c1a3; el guardado del propio motor, 6 ms. El HANDLE se ignora.
+ * The whole block is assembled in memory and written in one go at the
+ * end. With one WriteFile per field (thousands per save) the block took
+ * 1.3-1.5 s in c1a3; the engine's own save, 6 ms. The HANDLE is ignored.
  */
 static struct { unsigned char *d; unsigned int n, cap; int error; } sal;
 
@@ -312,27 +314,27 @@ static void escribir_cadena(HANDLE h, const char *s)
 }
 
 /*
- * Contexto del escaneo. Es el mismo para las entvars y para los bloques
- * privados: en los dos sitios hay punteros y en los dos hay que anotarlos.
- * Antes solo se escaneaban los bloques privados, y por eso el
- * pContainingEntity de las entvars se guardaba en crudo.
+ * Scan context. It is the same for the entvars and for the private
+ * blocks: both contain pointers and in both they have to be recorded.
+ * Previously only the private blocks were scanned, and that is why the
+ * entvars' pContainingEntity was saved raw.
  */
 static struct {
     unsigned char **privs;
     int            *tams;
     int             nedicts;
-    unsigned int    minp, maxp;        /* horquilla de los bloques privados */
-    unsigned int    edbase, edtop;     /* array de edicts                   */
-    unsigned int    venbase, ventop;   /* ventana del hunk, ver abajo       */
+    unsigned int    minp, maxp;        /* range of the private blocks       */
+    unsigned int    edbase, edtop;     /* edict array                       */
+    unsigned int    venbase, ventop;   /* hunk window, see below            */
 } esc;
 
 /*
- * Ventana alrededor del array de edicts para reconocer punteros al hunk
- * del motor. Estrecha a proposito: reconocer punteros por el valor tiene
- * el riesgo de confundir un float con una direccion, y cuanto mas ancha
- * la horquilla, mas facil es el falso positivo. 1 MB basta -- lo que se
- * ha visto en la practica cae a menos de 2 KB del array -- y deja fuera
- * el rango donde caen los floats normales de un mapa.
+ * Window around the edict array to recognise pointers into the engine's
+ * hunk. Deliberately narrow: recognising pointers by value risks mistaking
+ * a float for an address, and the wider the range, the easier a false
+ * positive. 1 MB is enough -- what has been seen in practice falls less
+ * than 2 KB from the array -- and it leaves out the range where a map's
+ * normal floats fall.
  */
 #define VENTANA_HUNK 0x100000u
 
@@ -350,13 +352,13 @@ static void preparar_escaneo(unsigned char **privs, int *tams, int nedicts,
     esc.ventop  = esc.edtop + VENTANA_HUNK;
 }
 
-/* ¿hay memoria de verdad en esa direccion? segundo filtro de la ventana */
+/* is there real memory at that address? second filter after the window */
 /*
- * VirtualQuery tarda ~2,5 ms por llamada en este sistema (algo la
- * intercepta), y se consultaba una vez por entidad casi siempre por la
- * misma direccion (pSystemGlobals): 510 llamadas = 1,3 s por guardado.
- * Se recuerda la ultima region consultada; las direcciones que caen
- * dentro se contestan sin llamar al sistema.
+ * VirtualQuery takes ~2.5 ms per call on this system (something hooks
+ * it), and it was queried once per entity, almost always for the same
+ * address (pSystemGlobals): 510 calls = 1.3 s per save. The last queried
+ * region is remembered; addresses that fall inside it are answered
+ * without calling the system.
  */
 static int direccion_viva(unsigned int v)
 {
@@ -382,7 +384,7 @@ static unsigned int buscar_relocs(unsigned char *bloque, unsigned int tam,
 
         if (v < 0x10000) continue;
 
-        /* dentro del array de edicts */
+        /* inside the edict array */
         if (esc.edbase && v >= esc.edbase && v < esc.edtop) {
             unsigned int d = v - esc.edbase;
             salida[n].desplazamiento = o;
@@ -393,7 +395,7 @@ static unsigned int buscar_relocs(unsigned char *bloque, unsigned int tam,
             continue;
         }
 
-        /* dentro de otro bloque privado */
+        /* inside another private block */
         if (v >= esc.minp && v < esc.maxp) {
             int j, hallado = 0;
             for (j = 0; j < esc.nedicts; j++) {
@@ -412,7 +414,7 @@ static unsigned int buscar_relocs(unsigned char *bloque, unsigned int tam,
             if (hallado) continue;
         }
 
-        /* dentro de hl.dll: vtables y punteros a metodos */
+        /* inside hl.dll: vtables and method pointers */
         if (tam_dll && v >= base_dll && v < base_dll + tam_dll) {
             salida[n].desplazamiento = o;
             salida[n].clase   = RELOC_DLL;
@@ -422,15 +424,15 @@ static unsigned int buscar_relocs(unsigned char *bloque, unsigned int tam,
             continue;
         }
 
-        /* datos estaticos del .exe: base fija, se dejan tal cual */
+        /* static data of the .exe: fixed base, left as they are */
         if (tam_exe && v >= base_exe && v < base_exe + tam_exe) continue;
 
-        /* algo del hunk del motor que no sabemos nombrar */
+        /* something in the engine's hunk that we cannot name */
         if (v >= esc.venbase && v < esc.ventop && direccion_viva(v)) {
             salida[n].desplazamiento = o;
             salida[n].clase   = RELOC_VIVO;
             salida[n].destino = 0;
-            salida[n].dentro  = v;          /* solo para la traza */
+            salida[n].dentro  = v;          /* only for the log */
             n++;
         }
     }
@@ -438,10 +440,10 @@ static unsigned int buscar_relocs(unsigned char *bloque, unsigned int tam,
 }
 
 /*
- * Las entvars se copian en crudo, pero los campos de tipo cadena guardan
- * un desplazamiento dentro de la tabla de cadenas del motor, que se
- * reconstruye distinta en cada arranque. Asi que esos van aparte, como
- * texto, y al cargar se rehacen con ED_ParseEpair.
+ * The entvars are copied raw, but string-type fields hold an offset into
+ * the engine's string table, which is rebuilt differently on every
+ * launch. So those go separately, as text, and on load they are rebuilt
+ * with ED_ParseEpair.
  */
 static void escribir_cadenas_de(HANDLE h, void *ed)
 {
@@ -449,7 +451,7 @@ static void escribir_cadenas_de(HANDLE h, void *ed)
     unsigned int cuenta = 0;
     unsigned int pos_cuenta = sal.n;
 
-    escribir_u32(h, 0);                       /* hueco para la cuenta */
+    escribir_u32(h, 0);                       /* placeholder for the count */
 
     for (i = 1; i < n; i++) {
         ddef_t *d = fielddef_n(i);
@@ -462,11 +464,11 @@ static void escribir_cadenas_de(HANDLE h, void *ed)
         cuenta++;
     }
 
-    if (cuenta && !sal.error)                 /* rellenar la cuenta */
+    if (cuenta && !sal.error)                 /* fill in the count */
         memcpy(sal.d + pos_cuenta, &cuenta, 4);
 }
 
-/* cuenta las reubicaciones por clase, solo para la traza */
+/* counts the relocations by class, only for the log */
 static void contar_clases(reloc_t *r, unsigned int n, unsigned int *por_clase)
 {
     unsigned int k;
@@ -486,15 +488,15 @@ static void anexar_bloques(const char *ruta)
     static reloc_t relocs[MAX_RELOCS];
 
     if (nedicts <= 0 || nedicts > MAX_EDICTS_PROPIO) {
-        reg("anexar: num_edicts fuera de rango (%d)", nedicts);
+        reg("append: num_edicts out of range (%d)", nedicts);
         return;
     }
 
     for (i = 0; i < 5; i++) por_clase[i] = 0;
     localizar_modulos();
     if (!tam_dll) {
-        Con_Printf("hlsave: no encuentro hl.dll en memoria, no se guarda el estado completo\n");
-        reg("anexar: hl.dll no localizada, abortado");
+        Con_Printf("hlsave: hl.dll not found in memory, full state not saved\n");
+        reg("append: hl.dll not located, aborted");
         return;
     }
 
@@ -520,7 +522,7 @@ static void anexar_bloques(const char *ruta)
 
     preparar_escaneo(privs, tams, nedicts, minp, maxp);
 
-    h = NULL;                        /* se escribe en memoria (sal) */
+    h = NULL;                        /* written to memory (sal) */
     sal.n = 0;
     sal.error = 0;
 
@@ -530,7 +532,7 @@ static void anexar_bloques(const char *ruta)
     escribir(h, (void *)A_SV_TIME, 8);
     escribir_u32(h, (unsigned int)nedicts);
     escribir_u32(h, (unsigned int)tam_entvars());
-    escribir_u32(h, base_dll);       /* donde cargo hl.dll en esta sesion */
+    escribir_u32(h, base_dll);       /* where hl.dll loaded in this session */
 
     for (i = 0; i < nedicts; i++) {
         void *e = edict_n(i);
@@ -540,10 +542,10 @@ static void anexar_bloques(const char *ruta)
         escribir_u32(h, 0);
 
         /*
-         * Las entvars tambien llevan punteros: el pContainingEntity de
-         * cada entidad apunta a su propio edict, y hay algun puntero mas
-         * a estructuras del motor. Antes se copiaban en crudo, que es lo
-         * que hacia petar la carga en otra sesion.
+         * The entvars carry pointers too: each entity's pContainingEntity
+         * points to its own edict, and there are a few more pointers to
+         * engine structures. They used to be copied raw, which is what
+         * made loading crash in another session.
          */
         escribir(h, vars_de(e), (unsigned int)tam_entvars());
         nr = buscar_relocs((unsigned char *)vars_de(e),
@@ -571,31 +573,31 @@ static void anexar_bloques(const char *ruta)
         }
     }
 
-    /* y ahora, de una vez, al final del fichero que acaba de escribir el motor */
+    /* and now, in one go, at the end of the file the engine has just written */
     if (sal.error) {
-        reg("anexar: sin memoria para montar el bloque, no se guarda el estado completo");
+        reg("append: out of memory to assemble the block, full state not saved");
         goto fin;
     }
     h = CreateFileA(ruta, GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
                     FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) {
-        reg("anexar: no se pudo abrir %s (error %lu)", ruta, GetLastError());
+        reg("append: could not open %s (error %lu)", ruta, GetLastError());
         goto fin;
     }
     SetFilePointer(h, 0, NULL, FILE_END);
     {
         DWORD w = 0;
         if (!WriteFile(h, sal.d, sal.n, &w, NULL) || w != sal.n)
-            reg("anexar: escritura incompleta en %s (%lu de %u bytes)", ruta, w, sal.n);
+            reg("append: incomplete write to %s (%lu of %u bytes)", ruta, w, sal.n);
     }
     CloseHandle(h);
-    Con_Printf("hlsave: %d entidades (%d con estado privado), %d punteros\n",
+    Con_Printf("hlsave: %d entities (%d with private state), %d pointers\n",
                ocupados, con_datos, total_relocs);
-    registrar_jugador("AL GUARDAR");
-    reg("guardado: edicts=%d ocupados=%u con_datos=%u relocs=%u mapa=%s",
+    registrar_jugador("ON SAVE");
+    reg("saved: edicts=%d in_use=%u with_data=%u relocs=%u map=%s",
         nedicts, ocupados, con_datos, total_relocs, MAPNAME);
-    reg("guardado: punteros por clase: edict=%u privado=%u hl.dll=%u vivo=%u"
-        "  (hl.dll en 0x%08x)",
+    reg("saved: pointers by class: edict=%u private=%u hl.dll=%u live=%u"
+        "  (hl.dll at 0x%08x)",
         por_clase[RELOC_EDICT], por_clase[RELOC_PRIVADO],
         por_clase[RELOC_DLL], por_clase[RELOC_VIVO], base_dll);
 
@@ -605,20 +607,20 @@ fin:
 }
 
 /* ================================================================== */
-/*  persistencia de los mapas entre transiciones                      */
+/*  map persistence across transitions                                */
 /* ================================================================== */
 /*
- * La alpha arranca cada mapa de cero en cada changelevel: al volver a un
- * mapa, botones, puertas y enemigos estaban como al principio. Ahora, al
- * salir por una transicion se guarda el estado del mapa en
- * valve\SAVE\<mapa>.niv (el mismo bloque CLDX de los guardados) y al
- * volver a entrar se repone, menos el jugador, que llega por el landmark
- * con su vida, armas y velocidad. "map" (partida nueva) los borra; "save"
- * los copia a valve\SAVE\<partida>\ y "load" los recupera de ahi, para
- * que los demas mapas esten como cuando se guardo.
+ * The alpha starts every map from scratch on each changelevel: when you
+ * went back to a map, buttons, doors and enemies were as at the start.
+ * Now, when leaving through a transition the map's state is saved to
+ * valve\SAVE\<map>.niv (the same CLDX block as the saves) and restored on
+ * re-entry, except the player, who arrives through the landmark with
+ * their health, weapons and velocity. "map" (new game) deletes them;
+ * "save" copies them to valve\SAVE\<savegame>\ and "load" gets them back
+ * from there, so the other maps are as they were when the game was saved.
  */
-static int conservar_jugador = 0;   /* mi_restaurar: no tocar el edict 1 */
-static int nivel_pendiente   = 0;   /* el proximo begin viene de un changelevel */
+static int conservar_jugador = 0;   /* mi_restaurar: do not touch edict 1 */
+static int nivel_pendiente   = 0;   /* the next begin comes from a changelevel */
 
 static void dir_niveles(char *out, const char *partida)
 {
@@ -641,7 +643,7 @@ static void borrar_niveles(const char *dir)
         if (DeleteFileA(f)) n++;
     } while (FindNextFileA(h, &fd));
     FindClose(h);
-    if (n) reg("niveles: borrados %d estados de %s", n, dir);
+    if (n) reg("levels: deleted %d states from %s", n, dir);
 }
 
 static void copiar_niveles(const char *de, const char *a)
@@ -661,10 +663,10 @@ static void copiar_niveles(const char *de, const char *a)
         if (CopyFileA(f1, f2, FALSE)) n++;
     } while (FindNextFileA(h, &fd));
     FindClose(h);
-    reg("niveles: copiados %d estados de %s a %s", n, de, a);
+    reg("levels: copied %d states from %s to %s", n, de, a);
 }
 
-/* guarda el estado del mapa actual en SAVE\<mapa>.niv (antes de salir) */
+/* saves the current map's state to SAVE\<map>.niv (before leaving) */
 static void guardar_nivel_actual(void)
 {
     char dir[512], ruta[600];
@@ -675,10 +677,10 @@ static void guardar_nivel_actual(void)
     CreateDirectoryA(dir, NULL);
     wsprintfA(ruta, "%s/%s.niv", dir, MAPNAME);
     h = CreateFileA(ruta, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE) { reg("niveles: no se pudo crear %s", ruta); return; }
+    if (h == INVALID_HANDLE_VALUE) { reg("levels: could not create %s", ruta); return; }
     CloseHandle(h);
     anexar_bloques(ruta);
-    reg("niveles: guardado el estado de %s al salir", MAPNAME);
+    reg("levels: saved the state of %s on exit", MAPNAME);
 }
 
 static void __cdecl mi_save(void)
@@ -688,7 +690,7 @@ static void __cdecl mi_save(void)
     FILETIME antes;
     WIN32_FILE_ATTRIBUTE_DATA info;
     if (Cmd_Argc() == 2 && lstrcmpiA(Cmd_Argv(1), "quick") == 0) {
-        /* F6/F7 de fabrica: el guardado rapido va a la ranura 12 del menu (s11) */
+        /* stock F6/F7: the quick save goes to menu slot 12 (s11) */
         Cbuf_InsertText("save s11\n");
         return;
     }
@@ -697,7 +699,7 @@ static void __cdecl mi_save(void)
     QueryPerformanceFrequency(&frec);
     QueryPerformanceCounter(&c0);
     GetSystemTimeAsFileTime(&antes);
-    ((fn_void_t)A_HOST_SAVEGAME)();      /* el guardado original, intacto */
+    ((fn_void_t)A_HOST_SAVEGAME)();      /* the original save, untouched */
     QueryPerformanceCounter(&c1);
 
     if (Cmd_Argc() != 2) return;
@@ -706,10 +708,10 @@ static void __cdecl mi_save(void)
 
     wsprintfA(ruta, "%s/%s.sav", GAMEDIR, nombre);
     /*
-     * Solo si el motor ACABA de escribir el fichero: si se nego a guardar
-     * ("Can't savegame with a dead player"...) y ya habia un .sav con ese
-     * nombre, se le anadiria un bloque a una partida vieja. Margen de 2 s
-     * por la resolucion de la fecha de los ficheros.
+     * Only if the engine HAS JUST written the file: if it refused to save
+     * ("Can't savegame with a dead player"...) and there was already a
+     * .sav with that name, a block would be appended to an old game.
+     * 2 s margin because of the resolution of file timestamps.
      */
     if (!GetFileAttributesExA(ruta, GetFileExInfoStandard, &info)) return;
     {
@@ -718,14 +720,14 @@ static void __cdecl mi_save(void)
         t1.LowPart = info.ftLastWriteTime.dwLowDateTime;
         t1.HighPart = info.ftLastWriteTime.dwHighDateTime;
         if (t1.QuadPart + 20000000ULL < t0.QuadPart) {
-            reg("save: el motor no escribio %s, no se anade nada", ruta);
+            reg("save: the engine did not write %s, nothing appended", ruta);
             return;
         }
     }
     anexar_bloques(ruta);
     QueryPerformanceCounter(&c2);
 
-    /* los estados de los demas mapas visitados van con esta partida */
+    /* the states of the other visited maps go with this savegame */
     dir_niveles(de, NULL);
     dir_niveles(a, nombre);
     CreateDirectoryA(de, NULL);
@@ -733,14 +735,14 @@ static void __cdecl mi_save(void)
     borrar_niveles(a);
     copiar_niveles(de, a);
     QueryPerformanceCounter(&c3);
-    reg("tiempos del guardado: motor %d ms, bloque propio %d ms, estados de mapas %d ms",
+    reg("save timings: engine %d ms, own block %d ms, map states %d ms",
         (int)((c1.QuadPart - c0.QuadPart) * 1000 / frec.QuadPart),
         (int)((c2.QuadPart - c1.QuadPart) * 1000 / frec.QuadPart),
         (int)((c3.QuadPart - c2.QuadPart) * 1000 / frec.QuadPart));
 }
 
 /* ================================================================== */
-/*  lectura                                                           */
+/*  reading                                                           */
 /* ================================================================== */
 
 typedef struct {
@@ -776,7 +778,7 @@ static void leer_bytes(lector_t *l, void *destino, unsigned int n)
     l->p += n;
 }
 
-/* busca la marca CLDX por el final del fichero */
+/* looks for the CLDX marker from the end of the file */
 static int situar_bloque(lector_t *l)
 {
     unsigned int i;
@@ -788,7 +790,7 @@ static int situar_bloque(lector_t *l)
 }
 
 /* ================================================================== */
-/*  carga                                                             */
+/*  loading                                                           */
 /* ================================================================== */
 
 static unsigned char *fichero = NULL;
@@ -828,8 +830,8 @@ typedef struct {
 } cabecera_t;
 
 /*
- * Situa el lector justo despues de la cabecera del bloque propio.
- * Devuelve 0 si el bloque no esta o no cuadra.
+ * Positions the reader right after the header of our own block.
+ * Returns 0 if the block is missing or does not add up.
  */
 static int abrir_bloque(lector_t *l, cabecera_t *c)
 {
@@ -837,7 +839,7 @@ static int abrir_bloque(lector_t *l, cabecera_t *c)
     if (!situar_bloque(l)) return 0;
     if (leer_u32(l) != MARCA_EXTRA) return 0;
     if (leer_u32(l) != VERSION_EXTRA) return 0;
-    leer_cadena(l);                          /* mapa */
+    leer_cadena(l);                          /* map */
     leer_bytes(l, c->tiempo, 8);
     c->nedicts           = leer_u32(l);
     c->tamvars           = leer_u32(l);
@@ -846,9 +848,9 @@ static int abrir_bloque(lector_t *l, cabecera_t *c)
 }
 
 /*
- * Recorre el bloque entero sin tocar nada, solo para comprobar que cuadra.
- * Importante: sin esto, un fichero corrupto dejaria la partida a medio
- * destruir, porque la restauracion libera el estado antes de reponerlo.
+ * Walks the whole block without touching anything, just to check that it
+ * adds up. Important: without this, a corrupt file would leave the game
+ * half destroyed, because restoring frees the state before replacing it.
  */
 static int validar_bloque(void)
 {
@@ -863,9 +865,9 @@ static int validar_bloque(void)
 
     for (i = 0; i < c.nedicts && !l.error; i++) {
         unsigned int ncad, j, tampriv, nr;
-        if (leer_u32(&l)) continue;             /* libre */
+        if (leer_u32(&l)) continue;             /* free */
         leer_bytes(&l, NULL, c.tamvars);
-        nr = leer_u32(&l);                      /* punteros de las entvars */
+        nr = leer_u32(&l);                      /* entvars pointers */
         if (nr > MAX_RELOCS) return 0;
         leer_bytes(&l, NULL, nr * (unsigned int)sizeof(reloc_t));
         ncad = leer_u32(&l);
@@ -874,7 +876,7 @@ static int validar_bloque(void)
         tampriv = leer_u32(&l);
         if (tampriv > 0x10000) return 0;
         if (tampriv) leer_bytes(&l, NULL, tampriv);
-        nr = leer_u32(&l);                      /* punteros del bloque */
+        nr = leer_u32(&l);                      /* block pointers */
         if (nr > MAX_RELOCS) return 0;
         leer_bytes(&l, NULL, nr * (unsigned int)sizeof(reloc_t));
     }
@@ -882,13 +884,14 @@ static int validar_bloque(void)
 }
 
 /* ================================================================== */
-/*  estado vivo del mapa recien arrancado                             */
+/*  live state of the freshly started map                             */
 /* ================================================================== */
 /*
- * Hay punteros del motor que no sabemos traducir (clase VIVO). Para esos
- * el valor bueno no es el del fichero -- que es de otro proceso -- sino
- * el que tiene el mapa recien arrancado, que apunta a las estructuras de
- * ESTA sesion. Asi que antes de destruir nada se guarda una copia.
+ * There are engine pointers we cannot translate (class VIVO). For those
+ * the right value is not the one in the file -- which belongs to another
+ * process -- but the one the freshly started map has, which points to
+ * THIS session's structures. So a copy is taken before destroying
+ * anything.
  */
 static unsigned char *copia_viva[MAX_EDICTS_PROPIO];
 static int            tam_copia_viva[MAX_EDICTS_PROPIO];
@@ -915,14 +918,14 @@ static void tomar_copia_viva(void)
 }
 
 /*
- * Un trigger_changelevel se apaga solo en cuanto lo pisas (solid a
- * SOLID_NOT y su funcion de toque a nulo), antes de pedir el cambio. Si
- * el cambio no llega a hacerse -- la salida a c1a1c cuando el mapa no
- * existia y se ignoraba --, el trigger se queda apagado, se guarda asi y
- * la salida ya no vuelve a funcionar en esa partida por mucho que se
- * cargue. Un cambio que si se hace carga otro mapa, asi que en un
- * guardado un trigger_changelevel apagado es siempre un cambio fallido:
- * se rearma con lo que tenia el mismo edict en el mapa recien arrancado.
+ * A trigger_changelevel turns itself off as soon as you step on it (solid
+ * to SOLID_NOT and its touch function to null), before requesting the
+ * change. If the change never happens -- the exit to c1a1c when the map
+ * did not exist and was ignored --, the trigger stays off, is saved that
+ * way and the exit never works again in that game no matter how often it
+ * is loaded. A change that does happen loads another map, so in a save a
+ * disabled trigger_changelevel is always a failed change: it is re-armed
+ * with what the same edict had in the freshly started map.
  */
 static void rearmar_salidas(void)
 {
@@ -945,7 +948,7 @@ static void rearmar_salidas(void)
         if (*solid != 0.0f || *(unsigned int *)(p + PRIV_TOQUE) != 0) continue;
         if (tam_privado[i] <= PRIV_MAPA_DESTINO ||
             tam_copia_viva[i] != tam_privado[i]) continue;
-        /* misma clase en los dos (la vtable ya esta recolocada) */
+        /* same class in both (the vtable is already relocated) */
         if (*(unsigned int *)p != *(unsigned int *)viva) continue;
         toque = *(unsigned int *)(viva + PRIV_TOQUE);
         if (!toque) continue;
@@ -953,17 +956,17 @@ static void rearmar_salidas(void)
         *(unsigned int *)(p + PRIV_TOQUE) = toque;
         *solid = SOLID_TRIGGER;
         ((void (__cdecl *)(void *, int))A_SV_LINKEDICT)(e, 0);
-        reg("restaurar: salida a %.32s (edict %d) estaba apagada, rearmada",
+        reg("restore: exit to %.32s (edict %d) was disabled, re-armed",
             (char *)(p + PRIV_MAPA_DESTINO), i);
     }
 }
 
 /*
- * El trigger de la salida a c1a1c (*15 de c1a1a) es una franja de 22
- * unidades (z -118..-96) en lo alto del hueco de la puerta doble, que va
- * de -166 a -38: agachado se pasa por debajo sin tocarlo. Se estira a
- * todo el hueco cada vez que se entra al mapa (y despues de cargar, que
- * repone los mins/maxs del guardado).
+ * The trigger for the exit to c1a1c (*15 in c1a1a) is a 22-unit strip
+ * (z -118..-96) at the top of the double door opening, which spans -166
+ * to -38: crouching you pass under it without touching it. It is
+ * stretched to the whole opening every time the map is entered (and
+ * after loading, which restores the saved mins/maxs).
  */
 static const struct { const char *mapa, *destino; float zmin, zmax; } salidas_estiradas[] = {
     { "c1a1a", "c1a1c", -170.0f, -34.0f },
@@ -1000,18 +1003,18 @@ static void estirar_salidas(void)
             maxs[2] = salidas_estiradas[k].zmax - org[2];
             if (dtam) ((float *)(vars_de(e) + dtam->ofs * 4))[2] = maxs[2] - mins[2];
             ((void (__cdecl *)(void *, int))A_SV_LINKEDICT)(e, 0);
-            reg("salida a %s (edict %d) estirada a z %d..%d", salidas_estiradas[k].destino,
+            reg("exit to %s (edict %d) stretched to z %d..%d", salidas_estiradas[k].destino,
                 i, (int)salidas_estiradas[k].zmin, (int)salidas_estiradas[k].zmax);
         }
     }
 }
 
 /*
- * hl.dll marca con EF_BRIGHTFIELD (un campo de particulas) al monstruo que
- * arranca atascado en la pared: una marca de depuracion para el mapeador.
- * parchear.ps1 la quita de hl.dll, pero los guardados de antes la llevan
- * en las entvars y se repondria al cargar. Nada mas en la alpha usa ese
- * efecto, asi que se quita de todas las entidades.
+ * hl.dll marks with EF_BRIGHTFIELD (a particle field) any monster that
+ * starts stuck in a wall: a debugging mark for the mapper. parchear.ps1
+ * removes it from hl.dll, but older saves carry it in the entvars and it
+ * would come back on load. Nothing else in the alpha uses that effect, so
+ * it is removed from every entity.
  */
 static void quitar_marcas_atasco(void)
 {
@@ -1028,20 +1031,20 @@ static void quitar_marcas_atasco(void)
         v = (int)*ef;
         if (!(v & EF_BRIGHTFIELD)) continue;
         *ef = (float)(v & ~EF_BRIGHTFIELD);
-        reg("restaurar: quitado el campo de particulas (monstruo atascado) al edict %d", i);
+        reg("restore: removed the particle field (stuck monster) from edict %d", i);
     }
 }
 
 /*
- * El progs.dat de la alpha declara como "entity" campos que hl.dll usa
- * como enteros (sequence, weapon, weapons, ammo_*, items, button...). Al
- * guardar, el motor convierte cada campo entity en numero de edict
- * (NUM_FOR_EDICT), y "weapon" lleva en los bytes altos el estado del
- * cambio de arma: tras cambiar de arma la conversion se sale de rango y
- * el guardado aborta con "NUM_FOR_EDICT: Bad pointer". Se cambia en
- * memoria el tipo de "weapon" a float: el texto del .sav lleva un numero
- * inocuo y la carga repone el valor exacto desde el bloque CLDX. Los
- * progs se cargan con cada mapa, asi que se hace en cada "begin".
+ * The alpha's progs.dat declares as "entity" fields that hl.dll uses as
+ * integers (sequence, weapon, weapons, ammo_*, items, button...). When
+ * saving, the engine converts each entity field into an edict number
+ * (NUM_FOR_EDICT), and "weapon" carries the weapon-switch state in its
+ * high bytes: after switching weapons the conversion goes out of range
+ * and the save aborts with "NUM_FOR_EDICT: Bad pointer". The type of
+ * "weapon" is changed to float in memory: the .sav text gets a harmless
+ * number and loading restores the exact value from the CLDX block. The
+ * progs are loaded with every map, so this is done on every "begin".
  */
 #define TIPO_FLOAT   2
 #define TIPO_ENTIDAD 4
@@ -1053,7 +1056,7 @@ static void arreglar_tipo_weapon(void)
     if (!d || (d->tipo & 0x7fff) != TIPO_ENTIDAD) return;
     d->tipo = (unsigned short)((d->tipo & 0x8000) | TIPO_FLOAT);
     if (!avisado) {
-        reg("progs: campo weapon de entity a float (el guardado petaba tras cambiar de arma)");
+        reg("progs: weapon field changed from entity to float (saving crashed after switching weapons)");
         avisado = 1;
     }
 }
@@ -1069,11 +1072,11 @@ static void soltar_copia_viva(void)
 }
 
 /*
- * Suma de control de un bloque ignorando los punteros. Sirve para
- * comparar el bloque del fichero con el que queda en memoria: todo lo
- * que no sea un puntero tiene que salir igual, y los punteros no pueden
- * salir igual porque son de otro proceso. Sin cerarlos la comparacion no
- * diria nada.
+ * Checksum of a block ignoring the pointers. Used to compare the block in
+ * the file with the one left in memory: everything that is not a pointer
+ * must come out the same, and the pointers cannot come out the same
+ * because they belong to another process. Without zeroing them the
+ * comparison would say nothing.
  */
 static unsigned int suma_neutra(const unsigned char *b, unsigned int tam,
                                 reloc_t *r, unsigned int n)
@@ -1093,9 +1096,9 @@ static unsigned int suma_neutra(const unsigned char *b, unsigned int tam,
 }
 
 /*
- * Aplica las reubicaciones que se pueden reconstruir a base de calculo.
- * Las de clase VIVO no pasan por aqui: se resuelven en la primera pasada,
- * que es cuando todavia existe el estado del mapa recien arrancado.
+ * Applies the relocations that can be rebuilt by calculation. Those of
+ * class VIVO do not go through here: they are resolved in the first pass,
+ * which is when the state of the freshly started map still exists.
  */
 static void aplicar_relocs(unsigned char *destino, unsigned int tam,
                            reloc_t *r, unsigned int n,
@@ -1119,13 +1122,13 @@ static void aplicar_relocs(unsigned char *destino, unsigned int tam,
             valor = (unsigned int)privs[r[k].destino] + r[k].dentro;
             break;
         case RELOC_DLL:
-            /* la vtable y los punteros a metodos, rehechos sobre la base
-               que tiene hl.dll AHORA, no la de cuando se guardo */
+            /* the vtable and method pointers, rebuilt on the base hl.dll
+               has NOW, not the one it had when the game was saved */
             if (r[k].dentro >= tam_dll) { (*fuera)++; continue; }
             valor = base_dll + r[k].dentro;
             break;
         default:
-            continue;                       /* VIVO: ya resuelto */
+            continue;                       /* VIVO: already resolved */
         }
 
         *(unsigned int *)(destino + r[k].desplazamiento) = valor;
@@ -1133,15 +1136,15 @@ static void aplicar_relocs(unsigned char *destino, unsigned int tam,
     }
 }
 
-/* segunda fase: el mapa ya esta cargado, ahora se repone el estado */
+/* second phase: the map is already loaded, now the state is restored */
 /*
- * Un edict ocupado en el mapa recien arrancado que en el estado guardado
- * estaba libre (p. ej. un monstruo que se mato y el juego retiro): hay que
- * dejarlo como lo deja ED_Free, desenlazado del mundo y sin modelo ni
- * solido. Si solo se marcaba libre seguia enlazado en el arbol de areas
- * como una entidad fantasma. Su bloque privado ya se libero antes.
+ * An edict in use in the freshly started map that was free in the saved
+ * state (e.g. a monster that was killed and removed by the game): it has
+ * to be left as ED_Free leaves it, unlinked from the world and with no
+ * model or solid. If it was only marked free it stayed linked in the area
+ * tree as a ghost entity. Its private block was already freed earlier.
  */
-#define A_SV_UNLINKEDICT 0x429FE9   /* SV_UnlinkEdict(edict); lo llama SV_LinkEdict al empezar */
+#define A_SV_UNLINKEDICT 0x429FE9   /* SV_UnlinkEdict(edict); SV_LinkEdict calls it first */
 static void liberar_como_ed_free(void *e)
 {
     static const char *campos[] = { "modelindex", "model", "solid", "takedamage",
@@ -1154,7 +1157,7 @@ static void liberar_como_ed_free(void *e)
     }
 }
 
-/* lee y descarta una entrada ocupada del bloque (tras su marca de libre) */
+/* reads and discards an in-use entry of the block (after its free flag) */
 static void saltar_entrada(lector_t *l, unsigned int tamvars)
 {
     unsigned int nr, ncad, j, tampriv;
@@ -1173,10 +1176,11 @@ static void saltar_entrada(lector_t *l, unsigned int tamvars)
 }
 
 /*
- * Al reponer un mapa por una transicion el reloj del servidor pasa al que
- * tenia ese mapa, pero el jugador trae tiempos absolutos del mapa del que
- * viene (air_finished, pain_finished...). Se desplazan lo mismo que el
- * reloj; si no, bajo el agua empezaria a ahogarse en el acto, por ejemplo.
+ * When a map is restored through a transition the server clock switches
+ * to the one that map had, but the player brings absolute times from the
+ * map they come from (air_finished, pain_finished...). They are shifted
+ * by the same amount as the clock; otherwise, underwater, for example,
+ * the player would start drowning immediately.
  */
 static void desplazar_tiempos_jugador(double delta)
 {
@@ -1205,32 +1209,32 @@ static void __cdecl mi_restaurar(void)
     static reloc_t relocs[MAX_RELOCS];
     static unsigned char vars[4096];
 
-    if (!fichero) { reg("restaurar: no hay fichero en memoria"); return; }
+    if (!fichero) { reg("restore: no file in memory"); return; }
 
     /*
-     * Sin la base de hl.dll no se pueden rehacer las vtables, y restaurar
-     * a medias es peor que no restaurar: el motor petaria en la primera
-     * llamada virtual.
+     * Without hl.dll's base the vtables cannot be rebuilt, and restoring
+     * halfway is worse than not restoring: the engine would crash on the
+     * first virtual call.
      */
     localizar_modulos();
     if (!tam_dll) {
-        Con_Printf("hlsave: no encuentro hl.dll en memoria, no se toca la partida\n");
-        reg("restaurar: hl.dll no localizada, abortado sin tocar nada");
+        Con_Printf("hlsave: hl.dll not found in memory, the game is left untouched\n");
+        reg("restore: hl.dll not located, aborted without touching anything");
         return;
     }
 
-    /* comprobar ANTES de destruir nada */
+    /* check BEFORE destroying anything */
     if (SVS_MAXCLIENTS != 1) {
-        /* en multijugador los edicts 1..maxclients son de los jugadores y
-           todo lo demas va desplazado respecto al guardado */
-        Con_Printf("hlsave: el mapa ha arrancado para %d jugadores, no se carga\n",
+        /* in multiplayer edicts 1..maxclients belong to the players and
+           everything else is shifted relative to the save */
+        Con_Printf("hlsave: the map was started for %d players, not loading\n",
                    SVS_MAXCLIENTS);
-        reg("restaurar: maxclients=%d, abortado sin tocar nada", SVS_MAXCLIENTS);
+        reg("restore: maxclients=%d, aborted without touching anything", SVS_MAXCLIENTS);
         return;
     }
     if (!validar_bloque()) {
-        Con_Printf("hlsave: el guardado no cuadra, no se toca la partida\n");
-        reg("restaurar: validacion fallida, abortado sin tocar nada");
+        Con_Printf("hlsave: the save does not add up, the game is left untouched\n");
+        reg("restore: validation failed, aborted without touching anything");
         return;
     }
 
@@ -1238,7 +1242,7 @@ static void __cdecl mi_restaurar(void)
     nedicts = cab.nedicts;
     tamvars = cab.tamvars;
     if (tamvars > sizeof(vars)) {
-        reg("restaurar: entvars de %u bytes, no caben en el bufer", tamvars);
+        reg("restore: entvars of %u bytes do not fit in the buffer", tamvars);
         return;
     }
     {
@@ -1247,36 +1251,37 @@ static void __cdecl mi_restaurar(void)
         if (conservar_jugador) desplazar_tiempos_jugador(SV_TIME - antes);
     }
 
-    reg("restaurar: hl.dll al guardar=0x%08x, ahora=0x%08x%s",
+    reg("restore: hl.dll when saved=0x%08x, now=0x%08x%s",
         cab.base_dll_guardada, base_dll,
-        cab.base_dll_guardada == base_dll ? "" : "  (MOVIDA)");
+        cab.base_dll_guardada == base_dll ? "" : "  (MOVED)");
 
     privs = (unsigned char **)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
                                         sizeof(void *) * nedicts);
     if (!privs) return;
     for (i = 0; i < 5; i++) por_clase[i] = 0;
 
-    /* la foto del estado vivo, antes de tocarlo */
+    /* the snapshot of the live state, before touching it */
     tomar_copia_viva();
 
     /*
-     * Los unicos punteros VIVO que aparecen son pev->pSystemGlobals
-     * (entvars +0x20c) y su copia en el bloque privado (+0x8): el mismo
-     * valor en todas las entidades. Si el edict del mapa recien arrancado
-     * no tiene de donde copiarlo (estaba libre: al volver a un mapa hay
-     * entidades creadas jugando, restos...), se queda nulo y hl.dll peta
-     * en cuanto la entidad piensa (0x10018d7d, lee [globales+0x7c]). Se
-     * toma entonces el del mundo (edict 0), que siempre esta.
+     * The only VIVO pointers that show up are pev->pSystemGlobals
+     * (entvars +0x20c) and its copy in the private block (+0x8): the same
+     * value in every entity. If the edict of the freshly started map has
+     * nowhere to copy it from (it was free: when returning to a map there
+     * are entities created while playing, gibs...), it stays null and
+     * hl.dll crashes as soon as the entity thinks (0x10018d7d, reads
+     * [globals+0x7c]). The world's one (edict 0), which always exists, is
+     * used instead.
      */
     globales = *(unsigned int *)(vars_de(edict_n(0)) + 0x20c);
 
-    /* limpiar lo que dejo el arranque del mapa */
+    /* clean up what the map startup left */
     for (i = 0; i < (unsigned int)NUM_EDICTS && i < MAX_EDICTS_PROPIO; i++) {
-        if (conservar_jugador && i == 1) continue;       /* el jugador se queda */
+        if (conservar_jugador && i == 1) continue;       /* the player stays */
         mi_free_privado(edict_n((int)i));
     }
 
-    /* --- primera pasada: entvars, cadenas y bloques privados --- */
+    /* --- first pass: entvars, strings and private blocks --- */
     for (i = 0; i < nedicts; i++) {
         void *e = edict_n((int)i);
         unsigned int libre, ncad, j, tampriv, nr, k;
@@ -1284,8 +1289,9 @@ static void __cdecl mi_restaurar(void)
         libre = leer_u32(&l);
         if (l.error) break;
 
-        /* transicion: el jugador es el que acaba de llegar, no el guardado;
-           a quien le apunte se le da el bloque privado del jugador vivo */
+        /* transition: the player is the one who just arrived, not the
+           saved one; whatever points to it gets the live player's private
+           block */
         if (conservar_jugador && i == 1) {
             if (!libre) saltar_entrada(&l, tamvars);
             privs[i] = (unsigned char *)privado_de(e);
@@ -1293,11 +1299,11 @@ static void __cdecl mi_restaurar(void)
         }
 
         /*
-         * OJO: no se toca la cabecera del edict (bytes 0x04..0x77). Ahi
-         * viven los enlaces de area, que son una lista doblemente enlazada
-         * entre edicts. Si se ponen a cero sin desenlazar antes, los
-         * vecinos quedan apuntando a un nodo muerto y el motor revienta al
-         * recorrer la lista. Solo se reponen las entvars.
+         * NOTE: the edict header (bytes 0x04..0x77) is not touched. That is
+         * where the area links live, a doubly linked list between edicts.
+         * If they are zeroed without unlinking first, the neighbours are
+         * left pointing to a dead node and the engine crashes when walking
+         * the list. Only the entvars are restored.
          */
         if (libre) {
             if (!edict_libre(e)) { descuadre++; liberar_como_ed_free(e); }
@@ -1309,9 +1315,9 @@ static void __cdecl mi_restaurar(void)
         *(int *)((char *)e + ED_FREE_OFS) = 0;
 
         /*
-         * Las entvars se leen a un bufer aparte para poder rescatar los
-         * punteros de clase VIVO del edict que todavia esta en pie, antes
-         * de sobreescribirlo.
+         * The entvars are read into a separate buffer so that the VIVO
+         * pointers can be rescued from the edict that is still standing,
+         * before overwriting it.
          */
         leer_bytes(&l, vars, tamvars);
         nr = leer_u32(&l);
@@ -1348,14 +1354,14 @@ static void __cdecl mi_restaurar(void)
                 leer_bytes(&l, NULL, tampriv);
             }
         } else if (tampriv) {
-            reg("restaurar: tam privado absurdo (%u) en edict %u", tampriv, i);
+            reg("restore: absurd private size (%u) in edict %u", tampriv, i);
             l.error = 1;
             break;
         }
 
-        /* los punteros del bloque: ahora solo los de clase VIVO, que
-           necesitan la copia. El resto, en la segunda pasada, cuando
-           existan todos los bloques. */
+        /* the block's pointers: now only the VIVO ones, which need the
+           copy. The rest in the second pass, once all the blocks
+           exist. */
         nr = leer_u32(&l);
         if (nr > MAX_RELOCS) { l.error = 1; break; }
         leer_bytes(&l, relocs, nr * (unsigned int)sizeof(reloc_t));
@@ -1370,13 +1376,13 @@ static void __cdecl mi_restaurar(void)
                         *(unsigned int *)(copia_viva[i] + des);
                     por_clase[RELOC_VIVO]++;
                 } else if (des == 8 && globales) {
-                    /* el gpGlobals del bloque privado: el del mundo */
+                    /* the private block's gpGlobals: the world's one */
                     *(unsigned int *)(privs[i] + des) = globales;
                     vivo_de_mundo++;
                 } else {
-                    /* sin copia de la que tirar, mejor nulo que muerto:
-                       la DLL comprueba los nulos, las direcciones de otro
-                       proceso no las comprueba nadie */
+                    /* with no copy to fall back on, better null than dead:
+                       the DLL checks for nulls, nobody checks addresses
+                       from another process */
                     *(unsigned int *)(privs[i] + des) = 0;
                     sin_copia++;
                 }
@@ -1385,7 +1391,7 @@ static void __cdecl mi_restaurar(void)
     }
 
     if (l.error) {
-        reg("restaurar: fichero corrupto en la primera pasada (edict %u)", i);
+        reg("restore: corrupt file in the first pass (edict %u)", i);
         soltar_copia_viva();
         HeapFree(GetProcessHeap(), 0, privs);
         return;
@@ -1393,7 +1399,7 @@ static void __cdecl mi_restaurar(void)
 
     NUM_EDICTS = (int)nedicts;
 
-    /* --- segunda pasada: los punteros que se reconstruyen --- */
+    /* --- second pass: the pointers that are rebuilt --- */
     {
         cabecera_t c2;
         abrir_bloque(&l, &c2);
@@ -1419,7 +1425,7 @@ static void __cdecl mi_restaurar(void)
         for (j = 0; j < ncad && !l.error; j++) { leer_u32(&l); leer_cadena(&l); }
 
         tampriv = leer_u32(&l);
-        bloque = l.d + l.p;                 /* el bloque tal cual esta en el .sav */
+        bloque = l.d + l.p;                 /* the block exactly as it is in the .sav */
         if (tampriv) leer_bytes(&l, NULL, tampriv);
         nr = leer_u32(&l);
         if (nr > MAX_RELOCS) { l.error = 1; break; }
@@ -1437,19 +1443,18 @@ static void __cdecl mi_restaurar(void)
         }
     }
 
-    reg("restaurar: punteros rehechos: edict=%u privado=%u hl.dll=%u vivo=%u"
-        "  (sin copia=%u descartados=%u, globales del mundo=%u)",
+    reg("restore: pointers rebuilt: edict=%u private=%u hl.dll=%u live=%u"
+        "  (no copy=%u discarded=%u, world globals=%u)",
         por_clase[RELOC_EDICT], por_clase[RELOC_PRIVADO],
         por_clase[RELOC_DLL], por_clase[RELOC_VIVO], sin_copia, fuera, vivo_de_mundo);
-    reg("restaurar: contenido de los bloques privados: %u comparados, %u distintos",
+    reg("restore: private block contents: %u compared, %u different",
         comparados, distintos);
 
     /*
-     * Enlazar de nuevo en el mundo todo lo restaurado, con su posicion
-     * guardada (como el loadgame de Quake): el enlace de area que se
-     * conserva es el del mapa recien arrancado, y una entidad que se habia
-     * movido (o que estaba libre al arrancar) quedaba enlazada donde no
-     * esta.
+     * Link everything restored back into the world, at its saved position
+     * (like Quake's loadgame): the area link that is kept is the one from
+     * the freshly started map, and an entity that had moved (or that was
+     * free at startup) stayed linked where it is not.
      */
     for (i = 1; i < nedicts; i++) {
         void *e = edict_n((int)i);
@@ -1465,14 +1470,14 @@ static void __cdecl mi_restaurar(void)
     fichero = NULL;
 
     if (conservar_jugador) {
-        Con_Printf("hlsave: estado del mapa repuesto (%d entidades)\n", nedicts);
-        registrar_jugador("TRAS VOLVER AL MAPA");
+        Con_Printf("hlsave: map state restored (%d entities)\n", nedicts);
+        registrar_jugador("AFTER RETURNING TO THE MAP");
     } else {
-        Con_Printf("hlsave: partida restaurada (%d entidades)\n", nedicts);
+        Con_Printf("hlsave: game restored (%d entities)\n", nedicts);
         forzar_vista_jugador();
-        registrar_jugador("TRAS CARGAR");
+        registrar_jugador("AFTER LOADING");
     }
-    reg("restaurar: hecho, %u edicts, %u descuadres ocupado/libre", nedicts, descuadre);
+    reg("restore: done, %u edicts, %u in-use/free mismatches", nedicts, descuadre);
 }
 
 static void __cdecl mi_load(void)
@@ -1482,26 +1487,26 @@ static void __cdecl mi_load(void)
     lector_t l;
     char *mapa;
     if (Cmd_Argc() == 2 && lstrcmpiA(Cmd_Argv(1), "quick") == 0) {
-        /* F6/F7 de fabrica: el guardado rapido va a la ranura 12 del menu (s11) */
+        /* stock F6/F7: the quick save goes to menu slot 12 (s11) */
         Cbuf_InsertText("load s11\n");
         return;
     }
 
     if (Cmd_Argc() != 2) {
-        Con_Printf("load <nombre> : cargar una partida\n");
+        Con_Printf("load <name> : load a saved game\n");
         return;
     }
     nombre = Cmd_Argv(1);
     wsprintfA(ruta, "%s/%s.sav", GAMEDIR, nombre);
 
     if (!cargar_fichero(ruta)) {
-        Con_Printf("hlsave: no se pudo leer %s\n", ruta);
+        Con_Printf("hlsave: could not read %s\n", ruta);
         return;
     }
 
     l.d = fichero; l.n = fichero_n; l.p = 0; l.error = 0;
     if (!situar_bloque(&l)) {
-        Con_Printf("hlsave: %s no tiene estado completo (guardado con el motor original)\n",
+        Con_Printf("hlsave: %s has no full state (saved with the original engine)\n",
                    nombre);
         HeapFree(GetProcessHeap(), 0, fichero);
         fichero = NULL;
@@ -1509,22 +1514,22 @@ static void __cdecl mi_load(void)
     }
     leer_u32(&l);
     if (leer_u32(&l) != VERSION_EXTRA) {
-        Con_Printf("hlsave: ese .sav es de un formato anterior (los punteros\n");
-        Con_Printf("        iban en crudo y no se pueden recolocar); hay que rehacerlo\n");
+        Con_Printf("hlsave: that .sav is from an older format (the pointers\n");
+        Con_Printf("        were stored raw and cannot be relocated); it must be redone\n");
         HeapFree(GetProcessHeap(), 0, fichero);
         fichero = NULL;
         return;
     }
     mapa = leer_cadena(&l);
     if (l.error || !*mapa) {
-        Con_Printf("hlsave: no se pudo leer el nombre del mapa\n");
+        Con_Printf("hlsave: could not read the map name\n");
         HeapFree(GetProcessHeap(), 0, fichero);
         fichero = NULL;
         return;
     }
     lstrcpynA(mapa_pendiente, mapa, sizeof(mapa_pendiente));
 
-    {   /* los demas mapas, como estaban cuando se guardo esta partida */
+    {   /* the other maps, as they were when this game was saved */
         char de[512], a[512];
         dir_niveles(a, NULL);
         dir_niveles(de, nombre);
@@ -1534,30 +1539,30 @@ static void __cdecl mi_load(void)
     }
     nivel_pendiente = 0;
 
-    Con_Printf("hlsave: cargando %s (mapa %s)...\n", nombre, mapa_pendiente);
-    reg("load: fichero=%s mapa=%s tam=%u", ruta, mapa_pendiente, fichero_n);
+    Con_Printf("hlsave: loading %s (map %s)...\n", nombre, mapa_pendiente);
+    reg("load: file=%s map=%s size=%u", ruta, mapa_pendiente, fichero_n);
 
     /*
-     * No se puede registrar un comando propio: Cmd_AddCommand aborta el
-     * juego si se llama despues de la inicializacion ("Cmd_AddCommand
-     * after host_initialized"). Asi que se engancha el propio "map": se
-     * deja la carga marcada como pendiente y mi_map restaura en cuanto el
-     * mapa haya terminado de arrancar.
+     * A command of our own cannot be registered: Cmd_AddCommand aborts the
+     * game if called after initialisation ("Cmd_AddCommand after
+     * host_initialized"). So "map" itself is hooked: the load is flagged
+     * as pending and mi_map restores as soon as the map has finished
+     * starting.
      */
     carga_pendiente = 1;
     /*
-     * "disconnect" primero: con una partida multijugador en marcha,
-     * "maxplayers" se niega ("can not be changed while a server is
-     * running"), el mapa arrancaba para varios jugadores con otra
-     * numeracion de edicts y el guardado se volcaba cruzado (peto en el
-     * calculo de choques). disconnect (0x43e35e) apaga el servidor.
+     * "disconnect" first: with a multiplayer game running, "maxplayers"
+     * refuses ("can not be changed while a server is running"), the map
+     * started for several players with a different edict numbering and
+     * the save was dumped misaligned (it crashed in the collision code).
+     * disconnect (0x43e35e) shuts the server down.
      */
     wsprintfA(orden, "disconnect\nmaxplayers 1\nmap %s\n", mapa_pendiente);
     Cbuf_InsertText(orden);
 }
 
-/* El comando "map" enganchado: arranca el mapa y, si venimos de un
-   "load", repone el estado en cuanto el mapa esta en pie. */
+/* The hooked "map" command: starts the map and, if we come from a
+   "load", restores the state as soon as the map is up. */
 static int mapa_existe(const char *mapa);
 static void ampliar_bufers_servidor(void);
 static void entidades_sin_pvs(int activar);
@@ -1565,12 +1570,12 @@ static void entidades_sin_pvs(int activar);
 static void __cdecl mi_map(void)
 {
     /*
-     * "New Game" del menu de la alpha manda "map start", pero la alpha no
-     * trae start.bsp: desde el menu no se podia empezar partida. Se va al
-     * primer mapa que si trae.
+     * "New Game" in the alpha's menu sends "map start", but the alpha does
+     * not ship start.bsp: a game could not be started from the menu. It
+     * goes to the first map that it does ship.
      */
     if (Cmd_Argc() >= 2 && lstrcmpiA(Cmd_Argv(1), "start") == 0 && !mapa_existe("start")) {
-        reg("map start: la alpha no trae start.bsp, se empieza en c1a1");
+        reg("map start: the alpha does not ship start.bsp, starting at c1a1");
         Cbuf_InsertText("map c1a1\n");
         return;
     }
@@ -1578,7 +1583,7 @@ static void __cdecl mi_map(void)
     if (!carga_pendiente) {
         char dir[512];
         dir_niveles(dir, NULL);
-        borrar_niveles(dir);                 /* partida nueva: mundo nuevo */
+        borrar_niveles(dir);                 /* new game: new world */
         nivel_pendiente = 0;
     }
 
@@ -1587,15 +1592,15 @@ static void __cdecl mi_map(void)
     entidades_sin_pvs(SVS_MAXCLIENTS == 1);
 
     if (carga_pendiente)
-        registrar_jugador("MAPA RECIEN ARRANCADO");
+        registrar_jugador("MAP JUST STARTED");
 }
 
 /*
- * El comando "begin" cierra el apreton de manos del cliente: a partir de
- * aqui el jugador ya existe de verdad, con su bloque privado reservado.
- * Restaurar antes de esto funcionaba en caliente por pura suerte (el
- * cliente ya venia conectado), pero en frio el jugador todavia no estaba
- * y el motor petaba al crearlo encima de lo restaurado.
+ * The "begin" command closes the client handshake: from here on the
+ * player really exists, with its private block allocated. Restoring
+ * before this worked on a warm start by pure luck (the client was already
+ * connected), but on a cold start the player was not there yet and the
+ * engine crashed when creating it on top of the restored state.
  */
 static void __cdecl mi_begin(void)
 {
@@ -1606,11 +1611,11 @@ static void __cdecl mi_begin(void)
     arreglar_tipo_weapon();
     if (carga_pendiente) {
         carga_pendiente = 0;
-        registrar_jugador("CLIENTE YA DENTRO");
+        registrar_jugador("CLIENT ALREADY IN");
         mi_restaurar();
     } else {
-        /* entrada normal (nueva partida o cambio de nivel): deja constancia
-           de la velocidad con la que llega el jugador (NOTAS apartado 27) */
+        /* normal entry (new game or level change): log the velocity the
+           player arrives with (NOTES section 27) */
         ddef_t *dvel = (ddef_t *)ED_FindField("velocity");
         ddef_t *dorg = (ddef_t *)ED_FindField("origin");
         if (SV_EDICTS && NUM_EDICTS > 1 && dvel && dorg && !edict_libre(edict_n(1))) {
@@ -1620,7 +1625,7 @@ static void __cdecl mi_begin(void)
             ddef_t *dan = (ddef_t *)ED_FindField("angles");
             float *va = dva ? (float *)(vars_de(edict_n(1)) + dva->ofs * 4) : v;
             float *an = dan ? (float *)(vars_de(edict_n(1)) + dan->ofs * 4) : v;
-            reg("entrada en %s: org=(%d %d %d) velocidad=(%d %d %d) v_angle=(%d %d) angles=(%d %d)",
+            reg("entering %s: org=(%d %d %d) velocity=(%d %d %d) v_angle=(%d %d) angles=(%d %d)",
                 MAPNAME, (int)o[0], (int)o[1], (int)o[2], (int)v[0], (int)v[1], (int)v[2],
                 (int)va[0], (int)va[1], (int)an[0], (int)an[1]);
         }
@@ -1631,19 +1636,19 @@ static void __cdecl mi_begin(void)
             wsprintfA(ruta, "%s/%s.niv", dir, MAPNAME);
             if (SVS_MAXCLIENTS == 1 && GetFileAttributesA(ruta) != INVALID_FILE_ATTRIBUTES) {
                 if (cargar_fichero(ruta)) {
-                    reg("niveles: %s ya se habia visitado, se repone su estado", MAPNAME);
+                    reg("levels: %s had already been visited, restoring its state", MAPNAME);
                     conservar_jugador = 1;
                     mi_restaurar();
                     conservar_jugador = 0;
                 }
             } else {
-                reg("niveles: %s no se habia visitado, empieza de cero", MAPNAME);
+                reg("levels: %s had not been visited, starting from scratch", MAPNAME);
             }
         }
     }
     estirar_salidas();
 
-    {   /* pruebas automaticas: valvezprueba_N.cfg en la entrada N a un mapa */
+    {   /* automated tests: valve\zprueba_N.cfg on the Nth entry into a map */
         static int entradas;
         char f[512], orden[64];
         entradas++;
@@ -1651,9 +1656,9 @@ static void __cdecl mi_begin(void)
         if (GetFileAttributesA(f) != INVALID_FILE_ATTRIBUTES) {
             wsprintfA(orden, "exec zprueba_%d.cfg\n", entradas);
             Cbuf_InsertText(orden);
-            reg("prueba: exec zprueba_%d.cfg en %s", entradas, MAPNAME);
+            reg("test: exec zprueba_%d.cfg in %s", entradas, MAPNAME);
         }
-        /* y valvezprueba_pos.txt ("x y z cabeceo giro"): colocar al jugador */
+        /* and valve\zprueba_pos.txt ("x y z pitch yaw"): place the player */
         wsprintfA(f, "%s/zprueba_pos.txt", GAMEDIR);
         {
             HANDLE hp = CreateFileA(f, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
@@ -1672,7 +1677,7 @@ static void __cdecl mi_begin(void)
                     va[0] = an[0] = pit; va[1] = an[1] = yaw; va[2] = an[2] = 0;
                     *(float *)(vars_de(pj) + dfi->ofs * 4) = 1.0f;
                     ((void (__cdecl *)(void *, int))A_SV_LINKEDICT)(pj, 0);
-                    reg("prueba: jugador colocado en (%d %d %d) mirando (%d %d)",
+                    reg("test: player placed at (%d %d %d) looking at (%d %d)",
                         (int)x, (int)y, (int)z, (int)pit, (int)yaw);
                 }
             }
@@ -1681,17 +1686,17 @@ static void __cdecl mi_begin(void)
 }
 
 /* ================================================================== */
-/*  cambios de nivel a mapas que no existen                           */
+/*  level changes to maps that do not exist                           */
 /* ================================================================== */
 /*
- * La alpha trae transiciones a mapas que nunca incluyo: c1a1a -> c1a1c y
- * c3a2 -> c3a3. Al tocarlas, pfnChangeLevel congela la pantalla para la
- * placa de carga y el motor no encuentra el .bsp: o sale un error fatal
- * con un MessageBox escondido detras del juego a pantalla completa, o la
- * imagen se queda parada 60 s hasta "load failed.". Parece colgado.
- * Si el mapa no esta, el cambio se ignora y se deshacen las dos marcas;
- * si no, las demas salidas del mapa dejarian de funcionar hasta cargar
- * otro nivel (changelevel_issued solo lo limpia el arranque de un mapa).
+ * The alpha has transitions to maps it never included: c1a1a -> c1a1c and
+ * c3a2 -> c3a3. When you touch them, pfnChangeLevel freezes the screen
+ * for the loading plaque and the engine cannot find the .bsp: either a
+ * fatal error comes up in a MessageBox hidden behind the fullscreen game,
+ * or the image stays frozen for 60 s until "load failed.". It looks hung.
+ * If the map is missing, the change is ignored and both flags are undone;
+ * otherwise the map's other exits would stop working until another level
+ * is loaded (changelevel_issued is only cleared by a map startup).
  */
 static int mapa_existe(const char *mapa)
 {
@@ -1713,11 +1718,11 @@ static int cambio_a_mapa_ausente(void)
     *(int *)A_CHANGELEVEL_ISSUED = 0;
     *(int *)A_SCR_DISABLED_LOAD  = 0;
 
-    /* el trigger vuelve a disparar en cada fotograma mientras lo pisas */
+    /* the trigger fires again every frame while you stand on it */
     if (lstrcmpiA(ultimo, mapa) != 0 || GetTickCount() - cuando > 5000) {
-        Con_Printf("La alpha no trae el mapa %s: esta salida no lleva a ningun sitio\n",
+        Con_Printf("The alpha does not ship map %s: this exit leads nowhere\n",
                    mapa);
-        reg("changelevel a %s ignorado: el mapa no existe", mapa);
+        reg("changelevel to %s ignored: the map does not exist", mapa);
         lstrcpynA(ultimo, mapa, sizeof(ultimo));
         cuando = GetTickCount();
     }
@@ -1725,19 +1730,19 @@ static int cambio_a_mapa_ausente(void)
 }
 
 /*
- * Donde se pueda, en vez de ignorar la salida se salta al siguiente
- * capitulo que si trae la alpha. Tiene que hacerse aqui, en la funcion que
- * llama hl.dll al tocar el trigger (entrada 5 de la tabla del motor), y no
- * lanzando otro "changelevel": ese comando escrito a mano peta en hl.dll
- * (SetChangeParms, hl.dll+0xb92d) incluso con el juego original. Cambiando
- * solo el nombre del mapa, todo lo demas sigue el camino normal del
- * trigger y se conservan la vida y las armas.
+ * Where possible, instead of ignoring the exit, it jumps to the next
+ * chapter that the alpha does ship. It has to be done here, in the
+ * function hl.dll calls when the trigger is touched (entry 5 of the
+ * engine's table), and not by issuing another "changelevel": that command
+ * typed by hand crashes in hl.dll (SetChangeParms, hl.dll+0xb92d) even
+ * with the original game. By changing only the map name, everything else
+ * follows the trigger's normal path and health and weapons are kept.
  */
 typedef void (__cdecl *fn_changelevel_t)(char *mapa, char *landmark);
 static fn_changelevel_t changelevel_original;
 
 static const struct { const char *falta, *siguiente; } capitulos[] = {
-    { "c1a1c", "c1a2a" },   /* fin del capitulo 1: salta al 2 */
+    { "c1a1c", "c1a2a" },   /* end of chapter 1: jump to 2 */
 };
 
 static void __cdecl mi_pfn_changelevel(char *mapa, char *landmark)
@@ -1747,24 +1752,24 @@ static void __cdecl mi_pfn_changelevel(char *mapa, char *landmark)
         for (i = 0; i < (int)(sizeof(capitulos) / sizeof(capitulos[0])); i++) {
             if (lstrcmpiA(mapa, capitulos[i].falta) == 0 &&
                 mapa_existe(capitulos[i].siguiente)) {
-                Con_Printf("La alpha no trae el mapa %s: se pasa al siguiente capitulo (%s)\n",
+                Con_Printf("The alpha does not ship map %s: moving on to the next chapter (%s)\n",
                            mapa, capitulos[i].siguiente);
-                reg("changelevel a %s redirigido a %s (landmark \"%s\")", mapa,
+                reg("changelevel to %s redirected to %s (landmark \"%s\")", mapa,
                     capitulos[i].siguiente, landmark ? landmark : "");
                 mapa = (char *)capitulos[i].siguiente;
                 break;
             }
         }
     }
-    /* si no hay capitulo siguiente, el comando llegara con el mapa que
-       falta y mi_changelevel lo ignorara */
+    /* if there is no next chapter, the command will arrive with the
+       missing map and mi_changelevel will ignore it */
     changelevel_original(mapa, landmark);
 }
 
 static void __cdecl mi_changelevel(void)
 {
     if (cambio_a_mapa_ausente()) return;
-    guardar_nivel_actual();              /* el mapa que se deja, tal cual */
+    guardar_nivel_actual();              /* the map being left, as it is */
     nivel_pendiente = 1;
     ((fn_void_t)A_HOST_CHANGELEVEL)();
 }
@@ -1778,30 +1783,32 @@ static void __cdecl mi_changelevel2(void)
 }
 
 /* ================================================================== */
-/*  bufer de mensajes lleno                                           */
+/*  message buffer full                                               */
 /* ================================================================== */
 /*
- * "SZ_GetSpace: overflow without allowoverflow set": con varios bichos a
- * la vez (3-4 perros y un cangrejo, a tiros) se llena uno de los bufers
- * de mensajes del servidor y SZ_GetSpace llama al error fatal. Los bufers
- * que SI admiten desbordarse (los de cada cliente) hacen otra cosa: se
- * vacian, se marcan como desbordados y el juego sigue, perdiendo lo de
- * ese fotograma. Se hace lo mismo para todos: la llamada al error en
- * 0x42f1fb va a sz_desborde, que apunta que bufer era y vuelve; el
- * codigo original sigue por el camino de allowoverflow. El error de "un
- * solo mensaje mas grande que el bufer entero" se queda como estaba.
+ * "SZ_GetSpace: overflow without allowoverflow set": with several
+ * creatures at once (3-4 dogs and a headcrab, under fire) one of the
+ * server's message buffers fills up and SZ_GetSpace calls the fatal
+ * error. The buffers that DO allow overflowing (each client's) do
+ * something else: they are emptied, flagged as overflowed and the game
+ * goes on, losing that frame's data. The same is done for all of them:
+ * the call to the error at 0x42f1fb goes to sz_desborde, which records
+ * which buffer it was and returns; the original code carries on down the
+ * allowoverflow path. The "single message larger than the whole buffer"
+ * error is left as it was.
  */
 /*
- * sv.datagram (MSG_BROADCAST) y sv.reliable_datagram (MSG_ALL) son de
- * 1 KB. Con una granada entre 3-4 perros (sangre, restos, sonidos) se
- * llena sv.datagram A MITAD DE UN MENSAJE: vaciarlo ahi (lo de abajo)
- * dejaba el resto del mensaje al principio y el cliente lo rechazaba
- * ("CL_ParseServerMessage: Illegible server message"). Se les da un bufer
- * grande: al mandarlo (0x431e2c) el motor copia sv.datagram al mensaje
- * del cliente SOLO si cabe entero y si no lo descarta completo, que es
- * limpio (se pierden los efectos de ese fotograma). El reliable se copia
- * al mensaje fiable de cada cliente, de 8000 bytes. SV_SpawnServer los
- * vuelve a apuntar a sus bufers fijos en cada mapa (0x432662..).
+ * sv.datagram (MSG_BROADCAST) and sv.reliable_datagram (MSG_ALL) are
+ * 1 KB. With a grenade among 3-4 dogs (blood, gibs, sounds) sv.datagram
+ * fills up IN THE MIDDLE OF A MESSAGE: emptying it there (the code below)
+ * left the rest of the message at the start and the client rejected it
+ * ("CL_ParseServerMessage: Illegible server message"). They are given a
+ * large buffer: when sending it (0x431e2c) the engine copies sv.datagram
+ * into the client's message ONLY if it fits entirely and otherwise
+ * discards it whole, which is clean (that frame's effects are lost). The
+ * reliable one is copied into each client's reliable message, of 8000
+ * bytes. SV_SpawnServer points them back to their fixed buffers on every
+ * map (0x432662..).
  * sizebuf_t: +8 data, +0xc maxsize, +0x10 cursize.
  */
 static unsigned char datagram_grande[16384];
@@ -1818,7 +1825,7 @@ static void ampliar_un_bufer(unsigned int sb, unsigned char *nuevo, int tam, con
     memcpy(nuevo, *data, (size_t)*cursize);
     *data = nuevo;
     *maxsize = tam;
-    if (avisado < 2) { reg("%s ampliado a %d bytes", nombre, tam); avisado++; }
+    if (avisado < 2) { reg("%s enlarged to %d bytes", nombre, tam); avisado++; }
 }
 
 static void ampliar_bufers_servidor(void)
@@ -1835,18 +1842,18 @@ void __cdecl registrar_desborde(unsigned int *buf)
     int i;
 
     for (i = 0; i < navisados; i++)
-        if (avisados[i] == (unsigned int)buf) return;   /* uno por bufer */
+        if (avisados[i] == (unsigned int)buf) return;   /* one per buffer */
     if (navisados < 8) avisados[navisados++] = (unsigned int)buf;
 
     if      ((unsigned int)buf == A_SV_DATAGRAM) nombre = "sv.datagram (MSG_BROADCAST)";
     else if ((unsigned int)buf == A_SV_RELIABLE) nombre = "sv.reliable_datagram (MSG_ALL)";
     else if ((unsigned int)buf == A_SV_SIGNON)   nombre = "sv.signon (MSG_INIT)";
-    else                                         nombre = "otro";
-    reg("SZ_GetSpace: se lleno %s en 0x%08x (maxsize=%d cursize=%d, mapa %s);"
-        " se vacia y se sigue", nombre, (unsigned int)buf, buf[3], buf[4], MAPNAME);
+    else                                         nombre = "other";
+    reg("SZ_GetSpace: %s filled up at 0x%08x (maxsize=%d cursize=%d, map %s);"
+        " emptying it and carrying on", nombre, (unsigned int)buf, buf[3], buf[4], MAPNAME);
 }
 
-/* ebx = el sizebuf_t (SZ_GetSpace lo guarda ahi); la pila es la del call */
+/* ebx = the sizebuf_t (SZ_GetSpace keeps it there); the stack is the call's */
 extern void sz_desborde(void);
 __asm__(".globl _sz_desborde\n"
         "_sz_desborde:\n"
@@ -1856,17 +1863,17 @@ __asm__(".globl _sz_desborde\n"
         "    ret\n");
 
 /* ================================================================== */
-/*  lista de partidas del menu                                        */
+/*  menu savegame list                                                */
 /* ================================================================== */
 /*
- * M_ScanSaves lee s0..s11.sav como si fueran de Quake: un numero y un
- * comentario en texto. Los de la alpha empiezan por la cabecera binaria
- * de Half-Life ("VALV"...), asi que todas las ranuras salian como "VALV"
- * y no habia forma de distinguirlas. Tras el escaneo original se reescribe
- * cada etiqueta con el mapa y la fecha, y las que no llevan el bloque
- * CLDX actual (las tres de fabrica, de 1997) quedan como no cargables.
- * La ultima ranura (s11) es la del guardado rapido: F6/F7 guardan y
- * cargan ahi (ver autoexec.cfg).
+ * M_ScanSaves reads s0..s11.sav as if they were Quake saves: a number and
+ * a text comment. The alpha's ones start with the binary Half-Life header
+ * ("VALV"...), so every slot showed up as "VALV" and there was no way to
+ * tell them apart. After the original scan each label is rewritten with
+ * the map and the date, and those without the current CLDX block (the
+ * three stock ones, from 1997) are left as not loadable.
+ * The last slot (s11) is the quick save one: F6/F7 save and load there
+ * (see autoexec.cfg).
  */
 #define NUM_RANURAS   12
 #define RANURA_RAPIDA 11
@@ -1876,7 +1883,7 @@ static void etiqueta_ranura(int i)
     char ruta[512], texto[128];
     char *etq = (char *)(A_MENU_NOMBRES + i * 40);
     int *cargable = (int *)(A_MENU_CARGABLE + i * 4);
-    const char *pre = (i == RANURA_RAPIDA) ? "RAPIDA " : "";
+    const char *pre = (i == RANURA_RAPIDA) ? "QUICK " : "";
     HANDLE h;
     DWORD tam, leidos;
     FILETIME ft, local;
@@ -1889,8 +1896,8 @@ static void etiqueta_ranura(int i)
     h = CreateFileA(ruta, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
                     FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) {
-        if (i == RANURA_RAPIDA) lstrcpynA(etq, "--- RAPIDA: vacia ---", 40);
-        return;                      /* el original ya la dejo como vacia */
+        if (i == RANURA_RAPIDA) lstrcpynA(etq, "--- QUICK: empty ---", 40);
+        return;                      /* the original already left it as empty */
     }
     tam = GetFileSize(h, NULL);
     GetFileTime(h, NULL, NULL, &ft);
@@ -1918,7 +1925,7 @@ static void etiqueta_ranura(int i)
                   st.wDay, st.wMonth, st.wHour, st.wMinute);
         *cargable = 1;
     } else {
-        wsprintfA(texto, "%s(antigua, no se puede cargar)", pre);
+        wsprintfA(texto, "%s(old, cannot be loaded)", pre);
         *cargable = 0;
     }
     lstrcpynA(etq, texto, 40);
@@ -1932,7 +1939,7 @@ static void __cdecl mi_scan(void)
     for (i = 0; i < NUM_RANURAS; i++) etiqueta_ranura(i);
 }
 
-/* repunta un "jmp rel32" del motor, comprobando a donde iba */
+/* repoints an engine "jmp rel32", checking where it used to go */
 static int repuntar_jmp(unsigned int sitio, unsigned int antes, void *ahora)
 {
     unsigned char *p = (unsigned char *)sitio;
@@ -1942,36 +1949,36 @@ static int repuntar_jmp(unsigned int sitio, unsigned int antes, void *ahora)
 }
 
 /* ================================================================== */
-/*  sombras                                                           */
+/*  shadows                                                           */
 /* ================================================================== */
 /*
- * Con r_shadows 1 el motor dibuja la sombra plana de todos los modelos de
- * estudio (R_StudioDrawModel 0x4163f3, en 0x4165e4). Queda bien en los
- * NPC, pero la del arma en primera persona sale flotando junto al arma y
- * la de la granada vuela con ella. En 0x4165fd, donde el motor solo se la
- * salta para el render aditivo (rendermode 5, entidad +0x98), se salta
- * ahora tambien para cl.viewent (0x849cb8, el arma en primera persona) y
- * para el modelo de la granada (nombre del model_t, entidad +0xa8).
+ * With r_shadows 1 the engine draws the flat shadow of every studio model
+ * (R_StudioDrawModel 0x4163f3, at 0x4165e4). It looks fine on NPCs, but
+ * the first-person weapon's shadow floats next to the weapon and the
+ * grenade's flies along with it. At 0x4165fd, where the engine only skips
+ * it for additive rendering (rendermode 5, entity +0x98), it is now also
+ * skipped for cl.viewent (0x849cb8, the first-person weapon) and for the
+ * grenade model (model_t name, entity +0xa8).
  */
 #define A_SOMBRA_CMP    0x4165FD   /* cmp dword [esi+98h],5 / je 0x416706  */
-#define A_SOMBRA_SI     0x41660A   /* dibujar la sombra                     */
-#define A_SOMBRA_NO     0x416706   /* saltarsela                            */
+#define A_SOMBRA_SI     0x41660A   /* draw the shadow                       */
+#define A_SOMBRA_NO     0x416706   /* skip it                               */
 #define A_CL_VIEWENT    0x849CB8
 
 int __cdecl sombra_permitida(unsigned char *ent)
 {
     const char *modelo;
 
-    if (*(int *)(ent + 0x98) == 5) return 0;               /* lo de antes */
+    if (*(int *)(ent + 0x98) == 5) return 0;               /* as before */
     static int visto_arma, visto_granada;
 
     modelo = *(const char **)(ent + 0xa8);
-    if ((unsigned int)ent == A_CL_VIEWENT) {               /* el arma      */
-        if (!visto_arma) { visto_arma = 1; reg("sombra: sin sombra el arma en primera persona (%.40s)", modelo ? modelo : "?"); }
+    if ((unsigned int)ent == A_CL_VIEWENT) {               /* the weapon   */
+        if (!visto_arma) { visto_arma = 1; reg("shadow: no shadow for the first-person weapon (%.40s)", modelo ? modelo : "?"); }
         return 0;
     }
-    if (modelo && strstr(modelo, "grenade")) {             /* la granada   */
-        if (!visto_granada) { visto_granada = 1; reg("sombra: sin sombra %.40s", modelo); }
+    if (modelo && strstr(modelo, "grenade")) {             /* the grenade  */
+        if (!visto_granada) { visto_granada = 1; reg("shadow: no shadow for %.40s", modelo); }
         return 0;
     }
     return 1;
@@ -2003,7 +2010,7 @@ static void enganchar_sombras(void)
     int i;
 
     if (memcmp(p, orig, sizeof(orig)) != 0) {
-        reg("AVISO: 0x%08x no es la comprobacion de la sombra, no se toca", A_SOMBRA_CMP);
+        reg("WARNING: 0x%08x is not the shadow check, leaving it alone", A_SOMBRA_CMP);
         return;
     }
     if (!VirtualProtect(p, sizeof(orig), PAGE_EXECUTE_READWRITE, &viejo)) return;
@@ -2014,19 +2021,20 @@ static void enganchar_sombras(void)
 }
 
 /* ================================================================== */
-/*  entidades que no llegan por el PVS                                */
+/*  entities that do not arrive through the PVS                       */
 /* ================================================================== */
 /*
- * La visibilidad precalculada de los mapas de la alpha tiene huecos
- * (apartado 24). r_novis arregla el dibujado del mundo, pero el servidor
- * sigue sin mandar las entidades cuyas hojas no salen en el PVS: una
- * puerta a 300 u delante no aparece hasta acercarte. Con UN jugador se
- * mandan todas: en SV_WriteEntitiesToClient (0x431394) se anula el salto
- * que descarta la entidad si ninguna de sus hojas es visible (0x43148b),
- * y el mensaje por fotograma de SV_SendClientDatagram (0x431dbf), que
- * era un bufer de pila de 1 KB, pasa a 4 KB (el loopback admite 8 KB).
- * En multijugador se deja el codigo original: por red un datagrama de mas
- * de 1 KB no vale. Se decide en cada mapa, con el servidor ya arrancado.
+ * The precomputed visibility of the alpha's maps has holes (NOTES
+ * section 24). r_novis fixes the drawing of the world, but the server
+ * still does not send entities whose leaves are not in the PVS: a door
+ * 300 u ahead does not appear until you get close. With ONE player they
+ * are all sent: in SV_WriteEntitiesToClient (0x431394) the jump that
+ * discards the entity if none of its leaves is visible (0x43148b) is
+ * nulled, and SV_SendClientDatagram's per-frame message (0x431dbf), which
+ * was a 1 KB stack buffer, becomes 4 KB (loopback allows 8 KB). In
+ * multiplayer the original code is kept: over the network a datagram of
+ * more than 1 KB is not valid. It is decided on every map, with the
+ * server already started.
  */
 static const struct { unsigned int va; unsigned char orig[7], nuevo[7]; int n; } pvs_parches[] = {
     { 0x43148B, {0x0F,0x84,0xFC,0x04,0x00,0x00},       {0x90,0x90,0x90,0x90,0x90,0x90},       6 },
@@ -2046,7 +2054,7 @@ static void entidades_sin_pvs(int activar)
         unsigned char *p = (unsigned char *)pvs_parches[i].va;
         if (memcmp(p, pvs_parches[i].orig, pvs_parches[i].n) != 0 &&
             memcmp(p, pvs_parches[i].nuevo, pvs_parches[i].n) != 0) {
-            reg("AVISO: bytes inesperados en 0x%08x, no se tocan las entidades", pvs_parches[i].va);
+            reg("WARNING: unexpected bytes at 0x%08x, leaving entities alone", pvs_parches[i].va);
             return;
         }
     }
@@ -2058,12 +2066,12 @@ static void entidades_sin_pvs(int activar)
     }
     FlushInstructionCache(GetCurrentProcess(), NULL, 0);
     estado = activar;
-    reg("entidades: %s", activar ? "se mandan todas (un jugador, mensaje de 4 KB)"
-                                 : "solo las del PVS (multijugador, codigo original)");
+    reg("entities: %s", activar ? "all are sent (one player, 4 KB message)"
+                                : "only those in the PVS (multiplayer, original code)");
 }
 
 /* ================================================================== */
-/*  instalacion                                                       */
+/*  installation                                                      */
 /* ================================================================== */
 
 static void instalar(void)
@@ -2072,7 +2080,7 @@ static void instalar(void)
     DWORD viejo;
 
     if (!VirtualProtect(tabla, 64 * 4, PAGE_READWRITE, &viejo)) {
-        reg("no se pudo desproteger la tabla de la DLL");
+        reg("could not unprotect the DLL table");
         return;
     }
     alloc_original = (fn_alloc_t)tabla[IDX_ALLOC_PRIVATE];
@@ -2083,34 +2091,34 @@ static void instalar(void)
     if ((unsigned int)changelevel_original == A_PFN_CHANGELEVEL)
         tabla[IDX_CHANGELEVEL] = (unsigned int)mi_pfn_changelevel;
     else
-        reg("AVISO: la entrada %d no era pfnChangeLevel (0x%08x)",
+        reg("WARNING: entry %d was not pfnChangeLevel (0x%08x)",
             IDX_CHANGELEVEL, (unsigned int)changelevel_original);
     VirtualProtect(tabla, 64 * 4, viejo, &viejo);
 
     if ((unsigned int)alloc_original != A_ALLOC_PRIVATE)
-        reg("AVISO: la entrada 51 no era la esperada (0x%08x)",
+        reg("WARNING: entry 51 was not the expected one (0x%08x)",
             (unsigned int)alloc_original);
 
-    /* arreglo del desbordamiento del bufer de guardado (ver motor.h) */
+    /* fix for the save buffer overflow (see engine.h) */
     if (*(unsigned int *)A_TAM_BUFFER_SAVE != 0x10000)
-        reg("AVISO: el tamaño del bufer de save no era 0x10000");
+        reg("WARNING: the save buffer size was not 0x10000");
     else if (escribir_dword(A_TAM_BUFFER_SAVE, TAM_BUFFER_NUEVO))
-        reg("bufer de guardado ampliado de 64 KB a %u KB",
+        reg("save buffer enlarged from 64 KB to %u KB",
             TAM_BUFFER_NUEVO / 1024);
 
     if (!escribir_dword(A_PUSH_SAVE_HANDLER, (unsigned int)mi_save))
-        reg("no se pudo repuntar el manejador de save");
+        reg("could not repoint the save handler");
     if (!escribir_dword(A_PUSH_LOAD_HANDLER, (unsigned int)mi_load))
-        reg("no se pudo repuntar el manejador de load");
+        reg("could not repoint the load handler");
     if (*(unsigned int *)A_PUSH_MAP_HANDLER != A_HOST_MAP)
-        reg("AVISO: el manejador de map no estaba donde se esperaba");
+        reg("WARNING: the map handler was not where expected");
     else if (!escribir_dword(A_PUSH_MAP_HANDLER, (unsigned int)mi_map))
-        reg("no se pudo repuntar el manejador de map");
+        reg("could not repoint the map handler");
 
     if (*(unsigned int *)A_PUSH_BEGIN_HANDLER != A_HOST_BEGIN)
-        reg("AVISO: el manejador de begin no estaba donde se esperaba");
+        reg("WARNING: the begin handler was not where expected");
     else if (!escribir_dword(A_PUSH_BEGIN_HANDLER, (unsigned int)mi_begin))
-        reg("no se pudo repuntar el manejador de begin");
+        reg("could not repoint the begin handler");
 
     {
         unsigned char *p = (unsigned char *)A_SZ_CALL_ERROR;
@@ -2118,30 +2126,31 @@ static void instalar(void)
             *(unsigned int *)(p + 1) != A_SYS_ERROR - (A_SZ_CALL_ERROR + 5) ||
             !escribir_dword(A_SZ_CALL_ERROR + 1,
                             (unsigned int)sz_desborde - (A_SZ_CALL_ERROR + 5)))
-            reg("AVISO: no se pudo enganchar el desborde de SZ_GetSpace");
+            reg("WARNING: could not hook the SZ_GetSpace overflow");
     }
 
     if (*(unsigned int *)A_PUSH_CHANGELEVEL_HANDLER != A_HOST_CHANGELEVEL ||
         !escribir_dword(A_PUSH_CHANGELEVEL_HANDLER, (unsigned int)mi_changelevel))
-        reg("AVISO: no se pudo enganchar changelevel");
+        reg("WARNING: could not hook changelevel");
     if (*(unsigned int *)A_PUSH_CHANGELEVEL2_HANDLER != A_HOST_CHANGELEVEL2 ||
         !escribir_dword(A_PUSH_CHANGELEVEL2_HANDLER, (unsigned int)mi_changelevel2))
-        reg("AVISO: no se pudo enganchar changelevel2");
+        reg("WARNING: could not hook changelevel2");
 
     if (!repuntar_jmp(A_JMP_SCAN_LOAD, A_M_SCANSAVES, mi_scan) ||
         !repuntar_jmp(A_JMP_SCAN_SAVE, A_M_SCANSAVES, mi_scan))
-        reg("AVISO: no se pudo enganchar la lista del menu de partidas");
+        reg("WARNING: could not hook the menu savegame list");
 
     enganchar_sombras();
-    reg("instalado");
+    reg("installed");
 }
 
 /*
- * Linea de ordenes por defecto, para que el .exe funcione con doble clic
- * sin ningun .bat. El motor la lee con GetCommandLineA (entrada de la IAT
- * en 0xd3f4b0), y esta DLL se carga antes del arranque del CRT, asi que
- * basta con cambiar esa entrada. Solo se anade lo que no venga ya; el
- * menu solo si no se pide ya arrancar algo (+map, +load, +togglemenu).
+ * Default command line, so the .exe works by double-clicking it without
+ * any .bat. The engine reads it with GetCommandLineA (IAT entry at
+ * 0xd3f4b0), and this DLL is loaded before the CRT starts, so changing
+ * that entry is enough. Only what is not already there is added; the
+ * menu only if nothing is already being asked to start (+map, +load,
+ * +togglemenu).
  */
 #define A_IAT_GETCMDLINE 0xD3F4B0
 static char linea_ordenes[2048];
@@ -2163,17 +2172,16 @@ static void preparar_linea_ordenes(void)
     DWORD viejo;
 
     if (!real || *iat != (unsigned int)real) {
-        reg("AVISO: la IAT en 0x%08x no es GetCommandLineA, sin linea por defecto",
+        reg("WARNING: the IAT entry at 0x%08x is not GetCommandLineA, no default command line",
             A_IAT_GETCMDLINE);
         return;
     }
     {
         /*
-         * Los valores por defecto van ANTES que los argumentos del usuario:
-         * los "+" se ejecutan en orden, y "+maxplayers 1" detras de un
-         * "+map" llegaba tarde (el mapa arrancaba en multijugador, donde
-         * los cambios de nivel no funcionan). El +togglemenu y el
-         * +sizedown, al final.
+         * The defaults go BEFORE the user's arguments: the "+" commands
+         * run in order, and "+maxplayers 1" after a "+map" came too late
+         * (the map started in multiplayer, where level changes do not
+         * work). +togglemenu and +sizedown go at the end.
          */
         const char *orig = GetCommandLineA(), *resto = orig;
         char args[1024];
@@ -2184,16 +2192,16 @@ static void preparar_linea_ordenes(void)
         n = (int)(resto - orig);
         if (n >= (int)sizeof(linea_ordenes) - 1) n = (int)sizeof(linea_ordenes) - 2;
         lstrcpynA(args, resto, sizeof(args));
-        lstrcpynA(linea_ordenes, orig, n + 1);                 /* el ejecutable */
+        lstrcpynA(linea_ordenes, orig, n + 1);                 /* the executable */
 
         #define DEFECTO(clave, texto) \
             if (!strstr(args, clave)) { lstrcatA(linea_ordenes, " "); lstrcatA(linea_ordenes, texto); }
         DEFECTO("-heapsize", "-heapsize 524288")
         DEFECTO("-condebug", "-condebug")
         if (!strstr(args, "-width") && !strstr(args, "-height")) {
-            /* la resolucion del escritorio (antes 800x600 fijo) */
-            /* el modo real de la pantalla: GetSystemMetrics da la
-               resolucion escalada si Windows escala por encima del 100 % */
+            /* the desktop resolution (previously a fixed 800x600) */
+            /* the real display mode: GetSystemMetrics gives the scaled
+               resolution if Windows scales above 100 % */
             char res[64];
             DEVMODEA dm;
             ZeroMemory(&dm, sizeof(dm));
@@ -2206,9 +2214,9 @@ static void preparar_linea_ordenes(void)
         }
         DEFECTO("-bpp", "-bpp 32")
         DEFECTO("+maxplayers", "+maxplayers 1")
-        DEFECTO("r_novis", "+r_novis 1")           /* apartado 24 */
-        DEFECTO("r_shadows", "+r_shadows 0")       /* apartado 37 */
-        DEFECTO("crosshair", "+crosshair 1")       /* el config.cfg del CD la trae a 0 */
+        DEFECTO("r_novis", "+r_novis 1")           /* NOTES section 24 */
+        DEFECTO("r_shadows", "+r_shadows 0")       /* NOTES section 37 */
+        DEFECTO("crosshair", "+crosshair 1")       /* the CD's config.cfg sets it to 0 */
         #undef DEFECTO
         if (lstrlenA(linea_ordenes) + lstrlenA(args) + 1 < (int)sizeof(linea_ordenes))
             lstrcatA(linea_ordenes, args);
@@ -2221,10 +2229,10 @@ static void preparar_linea_ordenes(void)
     if (!VirtualProtect(iat, 4, PAGE_READWRITE, &viejo)) return;
     *iat = (unsigned int)mi_GetCommandLineA;
     VirtualProtect(iat, 4, viejo, &viejo);
-    reg("linea de ordenes: %s", linea_ordenes);
+    reg("command line: %s", linea_ordenes);
 }
 
-/* lo llama DllMain (cargador.c) cuando el motor ya esta verificado y parcheado */
+/* called by DllMain (loader.c) once the engine has been verified and patched */
 void hlalpha_iniciar(void)
 {
     preparar_linea_ordenes();

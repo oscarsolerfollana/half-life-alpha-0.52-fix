@@ -1,30 +1,30 @@
 /*
- * cargador.c -- winmm.dll de la Half-Life Alpha 0.52 corregida.
+ * loader.c -- winmm.dll for the fixed Half-Life Alpha 0.52.
  *
- * El motor (enginegl.exe) importa WINMM.dll y Windows la busca primero en
- * la carpeta del juego: esta DLL se carga antes de que arranque el motor,
- * reenvia a la winmm.dll del sistema todo lo que se le pide (stubs de
- * winmm_stubs.c) y aplica los arreglos EN MEMORIA, sin tocar ningun
- * fichero de Valve:
- *   - comprueba por hash que el .exe es el enginegl.exe original de la 0.52
- *     (si no lo es, no toca nada: solo hace de winmm);
- *   - aplica los parches del motor (parches.h, solo bytes nuevos);
- *   - se engancha a LoadLibraryA para parchear hl.dll en cuanto se carga
- *     (tambien comprobando su hash);
- *   - arranca el resto (hlalpha.c): guardar y cargar, persistencia de
- *     mapas, linea de ordenes por defecto, etc.
+ * The engine (enginegl.exe) imports WINMM.dll and Windows looks for it
+ * first in the game folder: this DLL is loaded before the engine starts,
+ * forwards everything it is asked for to the system winmm.dll (stubs in
+ * winmm_stubs.c) and applies the fixes IN MEMORY, without touching any
+ * Valve file:
+ *   - checks by hash that the .exe is the original 0.52 enginegl.exe
+ *     (if it is not, it touches nothing: it just acts as winmm);
+ *   - applies the engine patches (patches.h, new bytes only);
+ *   - hooks LoadLibraryA to patch hl.dll as soon as it is loaded
+ *     (also checking its hash);
+ *   - starts the rest (hlalpha.c): save and load, map persistence,
+ *     default command line, etc.
  */
 #include <windows.h>
 #include <string.h>
-#include "parches.h"
+#include "patches.h"
 
-#define A_IAT_LOADLIBRARYA 0xD3F52C    /* IAT de enginegl.exe */
-#define HASH_ENGINEGL_CD   0x8E8BBD4989F8D1FFULL   /* enginegl.exe del CD de la alpha */
+#define A_IAT_LOADLIBRARYA 0xD3F52C    /* enginegl.exe IAT */
+#define HASH_ENGINEGL_CD   0x8E8BBD4989F8D1FFULL   /* enginegl.exe from the alpha CD */
 
 void reg(const char *fmt, ...);
 void hlalpha_iniciar(void);
 
-/* ---------------- reenvio a la winmm.dll del sistema ---------------- */
+/* ---------------- forwarding to the system winmm.dll ---------------- */
 
 #define WINMM_N_EXTERNO 193
 extern void *winmm_real[];
@@ -41,7 +41,7 @@ void *__cdecl winmm_resolver(int i)
         lstrcpyA(ruta + n, "\\winmm.dll");
         winmm_sistema = LoadLibraryA(ruta);
         if (!winmm_sistema) {
-            MessageBoxA(NULL, "No se pudo cargar la winmm.dll del sistema.",
+            MessageBoxA(NULL, "Could not load the system winmm.dll.",
                         "Half-Life Alpha", MB_ICONERROR);
             ExitProcess(1);
         }
@@ -52,7 +52,7 @@ void *__cdecl winmm_resolver(int i)
     return winmm_real[i];
 }
 
-/* ---------------- identificar los binarios de Valve ---------------- */
+/* ---------------- identifying Valve's binaries ---------------- */
 
 static unsigned long long hash_fichero(const char *ruta)
 {
@@ -74,8 +74,8 @@ static unsigned long long hash_modulo(HMODULE m)
     return hash_fichero(ruta);
 }
 
-/* aplica una lista de parches en memoria; base_real - base_pref es cuanto
-   se movio el modulo respecto a su base preferida */
+/* applies a list of patches in memory; base_real - base_pref is how far
+   the module moved from its preferred base */
 static int aplicar(const parche_t *p, unsigned int base_real, unsigned int base_pref)
 {
     int n = 0;
@@ -91,7 +91,7 @@ static int aplicar(const parche_t *p, unsigned int base_real, unsigned int base_
     return n;
 }
 
-/* ---------------- hl.dll: se parchea al cargarse ---------------- */
+/* ---------------- hl.dll: patched when it loads ---------------- */
 
 typedef HMODULE (WINAPI *fn_loadlib_t)(LPCSTR);
 static fn_loadlib_t loadlibrary_real;
@@ -104,16 +104,16 @@ static HMODULE WINAPI mi_LoadLibraryA(LPCSTR nombre)
         if (n >= 6 && lstrcmpiA(nombre + n - 6, "hl.dll") == 0 &&
             (n == 6 || nombre[n - 7] == '\\' || nombre[n - 7] == '/')) {
             if (hash_modulo(m) == HASH_HL_DLL)
-                reg("hl.dll original cargada en 0x%08x: %d parches aplicados en memoria",
+                reg("original hl.dll loaded at 0x%08x: %d patches applied in memory",
                     (unsigned int)m, aplicar(parches_hl, (unsigned int)m, BASE_HL_DLL));
             else
-                reg("AVISO: %s no es el hl.dll original de la alpha 0.52, no se parchea", nombre);
+                reg("WARNING: %s is not the original alpha 0.52 hl.dll, not patching", nombre);
         }
     }
     return m;
 }
 
-/* ---------------- arranque ---------------- */
+/* ---------------- startup ---------------- */
 
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD motivo, LPVOID reservado)
 {
@@ -121,26 +121,27 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD motivo, LPVOID reservado)
     if (motivo != DLL_PROCESS_ATTACH) return TRUE;
     DisableThreadLibraryCalls(inst);
 
-    reg("=== winmm.dll de hl-alpha-052-fixes cargada ===");
+    reg("=== hl-alpha-052-fixes winmm.dll loaded ===");
     /*
-     * Dos enginegl.exe con el mismo codigo: el del CD de la alpha y una copia
-     * que circula con el bit LARGE_ADDRESS_AWARE activado en la cabecera PE
-     * (Characteristics 0x12a en vez de 0x10a, y la suma recalculada). Solo
-     * cambian esos 4 bytes de cabecera, asi que los parches valen igual.
+     * Two enginegl.exe with the same code: the one from the alpha CD and a
+     * copy that circulates with the LARGE_ADDRESS_AWARE bit set in the PE
+     * header (Characteristics 0x12a instead of 0x10a, and the checksum
+     * recomputed). Only those 4 header bytes change, so the patches apply
+     * just the same.
      */
     {
         unsigned long long h = hash_modulo(GetModuleHandleA(NULL));
         if (h != HASH_ENGINEGL && h != HASH_ENGINEGL_CD) {
-            reg("el ejecutable no es el enginegl.exe original de la alpha 0.52: no se toca nada");
+            reg("the executable is not the original alpha 0.52 enginegl.exe: touching nothing");
             return TRUE;
         }
-        reg("enginegl.exe original (%s)", h == HASH_ENGINEGL_CD ? "el del CD" :
-            "copia con LARGE_ADDRESS_AWARE");
+        reg("original enginegl.exe (%s)", h == HASH_ENGINEGL_CD ? "the CD one" :
+            "copy with LARGE_ADDRESS_AWARE");
     }
-    reg("%d parches del motor aplicados en memoria",
+    reg("%d engine patches applied in memory",
         aplicar(parches_exe, (unsigned int)GetModuleHandleA(NULL), 0x400000));
 
-    {   /* enganche de LoadLibraryA en la IAT del motor */
+    {   /* hook of LoadLibraryA in the engine's IAT */
         unsigned int *iat = (unsigned int *)A_IAT_LOADLIBRARYA;
         FARPROC real = GetProcAddress(GetModuleHandleA("kernel32.dll"), "LoadLibraryA");
         DWORD viejo;
@@ -149,7 +150,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD motivo, LPVOID reservado)
             *iat = (unsigned int)mi_LoadLibraryA;
             VirtualProtect(iat, 4, viejo, &viejo);
         } else {
-            reg("AVISO: la IAT de LoadLibraryA no es la esperada; hl.dll no se parcheara");
+            reg("WARNING: the LoadLibraryA IAT entry is not the expected one; hl.dll will not be patched");
         }
     }
 
